@@ -73,10 +73,10 @@ object LauncherSpec extends ZIOSpecDefault:
     dir.resolve("sbta").toFile.setExecutable(true)
     dir
 
-  /** A Maven repository holding this sbta jar, for the script to download from. */
+  /** A directory laid out like the GitHub releases (`v<version>/sbta-<version>.jar`), for the script to download from. */
   private lazy val repo: Path =
     val dir = Files.createTempDirectory("sbta-repo")
-    val at  = dir.resolve(s"com/jamesward/sbta/$version")
+    val at  = dir.resolve(s"v$version")
     Files.createDirectories(at)
     Files.copy(jar, at.resolve(s"sbta-$version.jar"))
     val sha1 = java.security.MessageDigest.getInstance("SHA-1").digest(Files.readAllBytes(jar)).map(b => f"$b%02x").mkString
@@ -103,7 +103,7 @@ object LauncherSpec extends ZIOSpecDefault:
     if windows then List("cmd", "/c", dir.resolve("sbta.bat").toString) else List("bash", dir.resolve("sbta").toString)
 
   private def script(dir: Path, args: List[String], input: String = "", timeoutSeconds: Long = 300): Ran =
-    run(dir, scriptCommand(dir) ++ args, input, Map("SBTA_LAUNCH_REPO" -> repo.toUri.toString), timeoutSeconds)
+    run(dir, scriptCommand(dir) ++ args, input, Map("SBTA_RELEASES_URL" -> repo.toUri.toString), timeoutSeconds)
 
   private def suiteFor(sbtVersion: String) =
     val dir = build(sbtVersion)
@@ -148,7 +148,7 @@ object LauncherSpec extends ZIOSpecDefault:
           """{"jsonrpc":"2.0","method":"notifications/initialized"}""",
           """{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"projects","arguments":{}}}""",
         )
-        val mcp = McpProcess.start(dir, scriptCommand(dir) ++ List("--mcp", "--docs-url=none"), Map("SBTA_LAUNCH_REPO" -> repo.toUri.toString))
+        val mcp = McpProcess.start(dir, scriptCommand(dir) ++ List("--mcp", "--docs-url=none"), Map("SBTA_RELEASES_URL" -> repo.toUri.toString))
         try
           requests.foreach(mcp.send)
           val init     = mcp.response(1, 60)
@@ -234,7 +234,7 @@ object LauncherSpec extends ZIOSpecDefault:
                         dir,
                         List(Path.of(java.lang.System.getProperty("java.home"), "bin", "java").toString, "-jar", jar.toString, "--mcp", s"--docs-url=http://127.0.0.1:$port/"),
                         // sbta starts sbt with the build's ./sbta, which downloads this version of sbta.
-                        Map("SBTA_LAUNCH_REPO" -> repo.toUri.toString),
+                        Map("SBTA_RELEASES_URL" -> repo.toUri.toString),
                       )
                       try
                         mcp.send("""{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"spec","version":"1"}}}""")

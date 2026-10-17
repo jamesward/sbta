@@ -15,7 +15,7 @@ This build runs on its own launcher, in local mode: `./sbta` and `sbta.bat` run
 `target/sbta-local/sbta.jar` (copied there by `sbtaInstall`, as a new file, so a
 running sbta keeps its jar), and until it exists they are plain sbt, downloading sbt's
 launcher. That's how a fresh clone (and CI, on Linux and Windows) builds. The release
-scripts download `com.jamesward:sbta` instead; both come from `SbtaScripts`
+scripts download the jar of their version from its GitHub release instead; both come from `SbtaScripts`
 (`SbtaScripts.Release` and `SbtaScripts.Local`).
 
 ```
@@ -48,14 +48,16 @@ these engines started.
   installed next to `sbta.bat`, a download step in the .bat), and fails if an edit no
   longer applies exactly once. Upgrading sbt: `src/scripts/update.sh <version>`,
   set `SbtLaunchVersion`, fix any edit that fails.
-- **Publishing.** The assembly is the published jar (`com.jamesward:sbta`, no
-  dependencies in the pom, no Scala suffix), at the path the scripts download.
-  `sbtaDist` writes a GitHub release's files: `sbta-<version>.jar`, `sbta`,
-  `sbta.bat`, `SHA256SUMS`.
-- **CI.** `test.yml` (pushes, PRs, and called by `release.yml`) runs everything on
-  Linux, `testFull`, and `LauncherSpec` on Windows, which runs
-  `sbta.bat` against sbt 1 and 2 builds (required: no release without it). On a tag,
-  `release.yml` runs those tests, then `ci-release` (`CI_RELEASE=publishSigned`), then attaches `sbtaDist`'s files to a GitHub release.
+- **Releasing.** Push a `vX.Y.Z` tag. The version comes from it (sbt-dynver). There
+  is no Maven repository: `release.yml` runs the tests (`test.yml`, Linux and Windows),
+  then attaches `sbtaDist`'s files to the GitHub release: `sbta-<version>.jar` (the
+  shrunk jar), its `.sha1` (which the scripts check, as sbt's do for sbt-launch),
+  `sbta`, `sbta.bat` and `SHA256SUMS`. The release scripts download the jar from
+  `https://github.com/jamesward/sbta/releases/download/v<version>/`
+  (`$SBTA_RELEASES_URL` replaces that). 0.0.1 is also on Maven Central, from before this.
+- **CI.** `test.yml` (pushes, PRs, and called by `release.yml`) runs `testFull` on
+  Linux, and `LauncherSpec` on Windows with the build's own `sbta.bat` (required: no
+  release without it).
 - **Jar size: 33 MB.** The assembly (51 MB, after excluding zio-http's
   `netty-pkitesting` and Bouncy Castle: test-certificate generation, ~10 MB; sbta
   never serves TLS) is shrunk by ProGuard (`sbtaShrink`, `project/SbtaShrink.scala`,

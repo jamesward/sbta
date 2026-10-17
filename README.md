@@ -39,10 +39,12 @@ build through its MCP server:
 ## Install
 
 The `sbta` and `sbta.bat` scripts are sbt's own `sbt` and `sbt.bat`, changed only to
-download and run the `com.jamesward:sbta` jar (from Maven Central, or
-`$SBTA_LAUNCH_REPO`) instead of sbt's launcher, and to run `--mcp` in the JVM. Download
-them from a [release](https://github.com/jamesward/sbta/releases) and commit them to
-the build, like `./sbt`. The jar needs JDK 17+.
+download and run the sbta jar of their version (from its
+[GitHub release](https://github.com/jamesward/sbta/releases), checked against its
+`.sha1`) instead of sbt's launcher, and to run `--mcp` in the JVM. Download them from a
+release and commit them to the build, like `./sbt`. The jar needs JDK 17+.
+`$SBTA_RELEASES_URL` replaces `https://github.com/jamesward/sbta/releases/download`
+(for a mirror with the same `v<version>/sbta-<version>.jar` layout).
 
 ## MCP
 

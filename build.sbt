@@ -90,6 +90,8 @@ def codeToolAssets: Def.Initialize[Task[Seq[File]]] = Def.task {
 
 // ---- sbta ----
 
+ThisBuild / dynverSeparator := "-"
+
 lazy val sbta = (project in file("."))
   .settings(
     name := "sbta",
@@ -113,6 +115,7 @@ lazy val sbta = (project in file("."))
       "com.jamesward" % "skills" % "0.0.16" % Skills,
     ),
     ivyConfigurations ++= Seq(SbtLaunch, Proguard),
+    crossPaths := false,
     Compile / resourceGenerators += codeToolAssets.taskValue,
     Compile / resourceGenerators += Def.task {
       val jar = update.value.select(configurationFilter(SbtLaunch.name), moduleFilter(), artifactFilter(name = "sbt-launch", extension = "jar"))
@@ -171,17 +174,8 @@ lazy val sbta = (project in file("."))
       )
     },
 
-    // ---- publishing: the shrunk jar alone, at com/jamesward/sbta/<v>/sbta-<v>.jar (what the scripts download) ----
-    crossPaths := false,
-    Compile / packageBin / publishArtifact := false,
-    assembly / artifact := (assembly / artifact).value.withClassifier(None),
-    addArtifact(assembly / artifact, Def.task(fileConverter.value.toVirtualFile(sbtaShrink.value.toPath): xsbti.HashedVirtualFileRef)),
-    pomPostProcess := { (node: scala.xml.Node) =>
-      new scala.xml.transform.RuleTransformer(new scala.xml.transform.RewriteRule {
-        override def transform(n: scala.xml.Node): Seq[scala.xml.Node] =
-          if (n.label == "dependencies") Nil else n
-      }).transform(node).head
-    },
+    // Released as GitHub release files only (sbtaDist), not to a Maven repository.
+    publish / skip := true,
 
     // ---- scripts and release files ----
     Compile / SbtaScripts.sbtaScripts := Def.uncached(SbtaScripts.generate(
@@ -231,13 +225,14 @@ lazy val sbta = (project in file("."))
         copy
       }
       val files = jar +: scripts
-      val sums = files.map { f =>
-        val digest = java.security.MessageDigest.getInstance("SHA-256").digest(IO.readBytes(f))
-        s"${digest.map(b => f"$b%02x").mkString}  ${f.getName}"
-      }
+      def digest(algorithm: String, f: File) =
+        java.security.MessageDigest.getInstance(algorithm).digest(IO.readBytes(f)).map(b => f"$b%02x").mkString
+      // The scripts check the jar they download against this (as sbt's do for sbt-launch).
+      val sha1 = out / s"${jar.getName}.sha1"
+      IO.write(sha1, digest("SHA-1", jar))
       val sumsFile = out / "SHA256SUMS"
-      IO.writeLines(sumsFile, sums)
-      files :+ sumsFile
+      IO.writeLines(sumsFile, files.map(f => s"${digest("SHA-256", f)}  ${f.getName}"))
+      files :+ sha1 :+ sumsFile
     },
 
     // ---- tests: the launcher specs run the shrunk jar and the generated scripts ----

@@ -7,9 +7,10 @@ import sbt.*
  * with only what makes them run sbta instead of sbt's launcher. Two modes:
  *
  *  - [[SbtaScripts.Release]]: what users commit to their builds. The jar is
- *    `com.jamesward:sbta:<version>` from Maven Central (or `$SBTA_LAUNCH_REPO`, else
- *    `$SBT_LAUNCH_REPO`), cached in `~/.cache/sbt/boot/sbta/<version>/`; the Windows
- *    script downloads it too (sbt.bat expects an installed sbt, with its launcher).
+ *    `sbta-<version>.jar` from the `v<version>` GitHub release (or the same layout under
+ *    `$SBTA_RELEASES_URL`), checked against its `.sha1`, and cached in
+ *    `~/.cache/sbt/boot/sbta/<version>/`; the Windows script downloads it too (sbt.bat
+ *    expects an installed sbt, with its launcher).
  *  - [[SbtaScripts.Local]]: this build's own `./sbta` and `./sbta.bat` (`sbtaInstall`).
  *    The jar is the one this build made, at a path relative to the script. Until it
  *    exists (a fresh clone, or after `clean`), the script is plain sbt: it downloads
@@ -23,6 +24,9 @@ import sbt.*
 object SbtaScripts {
 
   val sbtaScripts = taskKey[Seq[File]]("Generate the release sbta and sbta.bat launcher scripts.")
+
+  /** Where releases are: `<Releases>/v<version>/sbta-<version>.jar` (and its `.sha1`). */
+  val Releases = "https://github.com/jamesward/sbta/releases/download"
 
   sealed trait Mode
   final case class Release(version: String) extends Mode
@@ -74,10 +78,12 @@ object SbtaScripts {
       case Release(version) =>
         Seq(
           "declare -a residual_args\n" ->
-            s"# sbta: the launcher jar this script runs (instead of sbt-launch)\ndeclare sbta_version=\"$version\"\ndeclare -a residual_args\n",
+            s"# sbta: the launcher jar this script runs (instead of sbt-launch), from its GitHub release\ndeclare sbta_version=\"$version\"\ndeclare sbta_releases=\"$Releases\"\ndeclare -a residual_args\n",
           "echo \"$(cygwinpath \"${sbt_home}/bin/sbt-launch.jar\")\"" -> "echo \"$(cygwinpath \"${sbt_home}/bin/sbta.jar\")\"",
-          "  local repo_base=\"$SBT_LAUNCH_REPO\"" -> "  local repo_base=\"${SBTA_LAUNCH_REPO:-$SBT_LAUNCH_REPO}\"",
-          "echo \"$repo_base/org/scala-sbt/sbt-launch/$1/sbt-launch-$1.jar\"" -> "echo \"$repo_base/com/jamesward/sbta/$1/sbta-$1.jar\"",
+          "  local repo_base=\"$SBT_LAUNCH_REPO\"" -> "  local repo_base=\"${SBTA_RELEASES_URL:-$sbta_releases}\"",
+          // repo_base is always set (no Maven Central fallback), so drop the default's `if`.
+          "  if [[ $repo_base == \"\" ]]; then\n    repo_base=\"https://repo1.maven.org/maven2\"\n  fi\n" -> "",
+          "echo \"$repo_base/org/scala-sbt/sbt-launch/$1/sbt-launch-$1.jar\"" -> "echo \"$repo_base/v$1/sbta-$1.jar\"",
           """  if [[ "$launcher_sv" == "" ]]; then
     if [[ "$init_sbt_version" != "_to_be_replaced" ]]; then
       launcher_sv="$init_sbt_version"
@@ -122,7 +128,7 @@ object SbtaScripts {
   private def windowsEdits(mode: Mode): Seq[(String, String)] = {
     val header = mode match {
       case Release(version) =>
-        s"rem sbta: the launcher jar this script runs (instead of sbt-launch)\nset sbta_version=$version\nset sbt_default_mem="
+        s"rem sbta: the launcher jar this script runs (instead of sbt-launch), from its GitHub release\nset sbta_version=$version\nset sbt_default_mem="
       case Local(jar) =>
         s"rem sbta: this build's own sbta jar, relative to this script (written by `sbtaInstall`).\n" +
           s"rem Until it exists, this script is plain sbt and runs sbt's launcher.\nset sbta_local_jar=${jar.replace('/', '\\')}\nset sbt_default_mem="
@@ -138,7 +144,7 @@ object SbtaScripts {
     }
     val jarStep = mode match {
       case Release(_) =>
-        """:sbta_jar
+        raw""":sbta_jar
 rem sbta: next to this script's sbt home, or downloaded to the user's sbt boot cache
 set "sbt_main=com.jamesward.sbta.Main"
 if exist "!SBT_HOME!\bin\sbta.jar" (
@@ -146,10 +152,9 @@ if exist "!SBT_HOME!\bin\sbta.jar" (
   exit /B 0
 )
 set "sbt_jar=%UserProfile%\.cache\sbt\boot\sbta\!sbta_version!\sbta-!sbta_version!.jar"
-set "sbta_repo=https://repo1.maven.org/maven2"
-if defined SBT_LAUNCH_REPO set "sbta_repo=%SBT_LAUNCH_REPO%"
-if defined SBTA_LAUNCH_REPO set "sbta_repo=%SBTA_LAUNCH_REPO%"
-set "sbta_url=!sbta_repo!/com/jamesward/sbta/!sbta_version!/sbta-!sbta_version!.jar"
+set "sbta_repo=$Releases"
+if defined SBTA_RELEASES_URL set "sbta_repo=%SBTA_RELEASES_URL%"
+set "sbta_url=!sbta_repo!/v!sbta_version!/sbta-!sbta_version!.jar"
 goto sbta_download
 """
       case Local(_) =>
