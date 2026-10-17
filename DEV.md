@@ -122,6 +122,13 @@ these engines started.
   aggregates are the ones not reached through another. One command per root-build
   project, cached until the build definition changes.
 - **Not covered yet:** Windows named pipes (`--mcp`).
+- **TODO: updates.** The release scripts pin their version (`sbta_version`), so a build
+  stays on it until someone downloads newer scripts. Add some kind of update check,
+  notification or updater: e.g. a cached, rate-limited check of the latest GitHub
+  release that prints a notice (and an MCP-visible hint for agents), and/or an
+  `sbta --update` that replaces `./sbta` and `sbta.bat` with the latest release's.
+  Also: `sbta.bat` doesn't check the downloaded jar's `.sha1` yet (`sbta` does, when
+  `shasum` is installed).
 
 ## `check`
 
