@@ -17,7 +17,7 @@ build through its MCP server:
      chmod +x sbta
    (`./sbta` is sbt: an existing `./sbt` can stay, and works as before.)
 2. Register the MCP server for the agent you are, choosing kiro, claude or cursor
-   (comma-separate several):
+   (separate several with commas or spaces):
      ./sbta --mcp --setup <client>
    It adds an `sbta` server (`./sbta --mcp`) to the project's MCP config and keeps
    any other servers there.

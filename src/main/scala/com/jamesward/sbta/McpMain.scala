@@ -31,8 +31,11 @@ object McpMain:
     args.indexWhere(a => a == "--setup" || a.startsWith("--setup=")) match
       case -1 => None
       case i =>
-        val value = if args(i).startsWith("--setup=") then Some(args(i).stripPrefix("--setup=")) else args.lift(i + 1)
-        Some(value.filterNot(_.startsWith("--")).toRight(s"--setup needs the MCP client(s): ${Setup.Client.values.map(_.id).mkString(", ")}")
+        // `--setup kiro,claude` or `--setup kiro claude` (cmd.exe splits arguments at commas, too).
+        val following = args.drop(i + 1).takeWhile(!_.startsWith("--"))
+        val attached  = if args(i).startsWith("--setup=") then List(args(i).stripPrefix("--setup=")) else Nil
+        val value     = Option((attached ++ following).mkString(",")).filter(_.nonEmpty)
+        Some(value.toRight(s"--setup needs the MCP client(s): ${Setup.Client.values.map(_.id).mkString(", ")}")
           .flatMap(Setup.Client.parse))
 
   final case class SbtTaskArgs(
