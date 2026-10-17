@@ -52,7 +52,9 @@ object SbtaScripts {
   }
 
   private def patch(name: String, text: String, edits: Seq[(String, String)]): String =
-    edits.foldLeft(text) { case (current, (from, to)) =>
+    // This file's multi-line literals have CRLF line ends in a checkout that converts them (git on Windows).
+    def lf(s: String) = s.replace("\r\n", "\n")
+    edits.map { case (from, to) => (lf(from), lf(to)) }.foldLeft(text) { case (current, (from, to)) =>
       val count = current.sliding(from.length).count(_ == from)
       if (count != 1) sys.error(s"sbta scripts: expected exactly one occurrence in $name of:\n$from\n(found $count)")
       current.replace(from, to)
