@@ -1,0 +1,4 @@
+src/scripts/sbt.bat -text
+sbta.bat -text
+sbta text eol=lf
+src/scripts/sbt text eol=lf

@@ -1,0 +1,9 @@
+# Reflective call sites in the shrunk sbta jar that ReflectionSpec can't check (their
+# class or member name is computed), and why each is safe. Format:
+#   <calling class, or a package prefix ending in />  <api, or *>  # reason
+# ReflectionSpec fails on a call site not listed here, and on an entry no call site matches.
+
+io/netty/  *  # proguard.pro keeps all of Netty
+com/jamesward/sbta/Launcher$  java.lang.Class.getMethod  # xsbt.boot.Boot.main, in the embedded sbt-launch jar (its own classloader)
+com/jamesward/sbta/IsolatedCheck$  java.lang.Class.getMethods  # the check bridge, in an embedded jar (its own classloader)
+com/jamesward/sbta/IsolatedSymbolIndex$  java.lang.Class.getMethods  # the symbol bridge, in an embedded jar (its own classloader)

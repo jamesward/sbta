@@ -1,0 +1,45 @@
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # The release workflow runs these same tests before it publishes.
+  workflow_call:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+
+    - uses: actions/setup-java@v6
+      with:
+        distribution: 'temurin'
+        java-version: 25
+        cache: 'sbt'
+
+    # testFull: sbt 2's `test` skips tests whose inputs are unchanged, and the sbt cache
+    # can restore those results. Includes the launcher specs (the shrunk jar and the
+    # sbta script against sbt 1 and 2 builds) and the reflection check of the shrunk jar.
+    - name: Tests
+      timeout-minutes: 30
+      run: ./sbta --server --no-server --batch testFull
+
+  # sbta.bat, on Windows: the launcher specs run it (and the jar) against sbt 1 and 2
+  # builds. Required: a release only happens when this passes.
+  test-windows:
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v7
+
+    - uses: actions/setup-java@v6
+      with:
+        distribution: 'temurin'
+        java-version: 25
+        cache: 'sbt'
+
+    # The build runs with its own sbta.bat: on a fresh checkout (no jar built yet) it is
+    # plain sbt, downloading sbt's launcher.
+    - name: Launcher tests (sbta.bat and the jar)
+      timeout-minutes: 45
+      shell: cmd
+      run: sbta.bat --server --no-server --batch "testOnly com.jamesward.sbta.LauncherSpec"
