@@ -44,7 +44,8 @@ object LauncherSpec extends ZIOSpecDefault:
       process.destroyForcibly()
     val text = Files.readString(out)
     Files.deleteIfExists(out)
-    Ran(if finished then process.exitValue() else -1, text)
+    // sbt colours its output on CI (e.g. `\e[0m[\e[0minfo\e[0m]`): compare plain text.
+    Ran(if finished then process.exitValue() else -1, Text.stripAnsi(text))
 
   private def runJar(dir: Path, args: List[String], input: String = ""): Ran =
     run(dir, List(Path.of(java.lang.System.getProperty("java.home"), "bin", "java").toString, "-jar", jar.toString) ++ args, input)

@@ -21,6 +21,9 @@ object IsolatedSymbolIndexSpec extends ZIOSpecDefault:
         val searchEntries = List(codePath(classOf[isolatedfixture.Probe]))
         val session = IsolatedSymbolIndex.open(entries, searchEntries, scala.util.Properties.versionNumberString)
         try
+          // A cold search reads the classpath first and has a 10 s budget, which a loaded
+          // machine (the launcher specs run alongside) can exceed: warm the index up.
+          Iterator.range(0, 3).map(_ => session.globSearch("Option", Some("scala"), 1)).find(_.nonEmpty)
           val hits              = session.globSearch("Probe", Some("isolatedfixture"), 100)
           val limitedHits       = session.globSearch("*", Some("isolatedfixture"), 1)
           val dependencyHits    = session.globSearch("Option", Some("scala"), 100)

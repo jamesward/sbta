@@ -30,7 +30,8 @@ object SbtaScripts {
   final case class Local(jar: String) extends Mode
 
   def generate(sources: File, out: File, mode: Mode, sbtVersion: String): Seq[File] = {
-    val unixSource    = IO.read(sources / "sbt")
+    // Line endings as on Unix, however the checkout wrote them (git on Windows may use CRLF).
+    val unixSource    = IO.read(sources / "sbt").replace("\r\n", "\n")
     val windowsSource = IO.read(sources / "sbt.bat").replace("\r\n", "\n")
     // The scripts and the embedded sbt launcher come from the same sbt release.
     Seq("sbt" -> s"declare init_sbt_version=$sbtVersion\n", "sbt.bat" -> s"set init_sbt_version=$sbtVersion\n").foreach {

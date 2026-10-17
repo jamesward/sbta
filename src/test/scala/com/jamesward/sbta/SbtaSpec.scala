@@ -129,9 +129,10 @@ object SbtaSpec extends ZIOSpecDefault:
         val s = session(dir, socket)
         for
           fiber <- ZIO.attemptBlockingInterrupt(s.exec("slow")).fork
-          _     <- ZIO.sleep(300.millis)
+          // Polled, not timed: on a loaded machine (CI) the fake server can lag behind.
+          _     <- ZIO.succeed(seen.contains("sbt/exec")).repeatUntil(identity).delay(50.millis).timeout(10.seconds)
           _     <- fiber.interrupt
-          _     <- ZIO.sleep(300.millis)
+          _     <- ZIO.succeed(seen.contains("sbt/cancelRequest")).delay(50.millis).repeatUntil(identity).timeout(10.seconds)
           _     <- ZIO.succeed(s.close())
         yield assertTrue(seen.contains("sbt/cancelRequest"))
       }
