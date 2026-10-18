@@ -47,7 +47,13 @@ these engines started.
   sbta's main class in the .bat, `--mcp` without sbtn, the JVM client when no sbtn is
   installed next to `sbta.bat`, a download step in the .bat), and fails if an edit no
   longer applies exactly once. Upgrading sbt: `src/scripts/update.sh <version>`,
-  set `SbtLaunchVersion`, fix any edit that fails.
+  set `SbtLaunchVersion`, fix any edit that fails. In this build's own (local-mode)
+  script, `--mcp` without a built jar runs `sbtaDevClasspath` (compile, then write the
+  runtime classpath with real paths to `target/sbta-dev/classpath`) through the sbt client,
+  with its output on stderr, then execs `java -cp <that> com.jamesward.sbta.Main --mcp`: a
+  fresh clone (a cloud routine, say) gets the MCP server in about a minute instead of
+  `sbtaInstall`'s four. `sbt runMain` won't do: its banner and `[info] running` lines go to
+  stdout, which MCP's stdio transport needs for JSON only; `bgRunMain` has no stdin.
 - **Releasing.** Push a `vX.Y.Z` tag. The version comes from it (sbt-dynver). There
   is no Maven repository: `release.yml` runs the tests (`test.yml`, Linux and Windows),
   then attaches `sbtaDist`'s files to the GitHub release: `sbta-<version>.jar` (the

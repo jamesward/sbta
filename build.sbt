@@ -21,6 +21,7 @@ lazy val Proguard     = config("proguard").hide
 lazy val sbtaShrink   = taskKey[File]("The sbta jar: the assembly, shrunk by ProGuard (proguard.pro).")
 lazy val sbtaDist     = taskKey[Seq[File]]("The release files (jar, scripts, SHA256SUMS) in target/sbta-dist.")
 lazy val sbtaInstall  = taskKey[Seq[File]]("Build sbta and write this build's own ./sbta and ./sbta.bat, which run it.")
+lazy val sbtaDevClasspath = taskKey[File]("Compile sbta and write its runtime classpath (target/sbta-dev/classpath), for ./sbta --mcp without a built jar.")
 lazy val sbtaLocalTestScripts = taskKey[Seq[File]]("Local-mode scripts for the launcher specs.")
 lazy val sbtaInstallExpected  = taskKey[Seq[File]]("What sbtaInstall writes, to check the committed scripts against.")
 
@@ -186,6 +187,14 @@ lazy val sbta = (project in file("."))
     )),
     // This build's own ./sbta and ./sbta.bat: they run the jar built here (copied to
     // target/sbta-local/sbta.jar), or, until it's built, sbt's launcher.
+    // Real paths (sbt 2's `export` prints virtual ones), joined for `java -cp`.
+    sbtaDevClasspath := Def.uncached {
+      val converter = fileConverter.value
+      val paths     = (Runtime / fullClasspath).value.map(a => converter.toPath(a.data).toAbsolutePath.toString)
+      val out       = baseDirectory.value / SbtaScripts.DevClasspath
+      IO.write(out, paths.mkString(java.io.File.pathSeparator))
+      out
+    },
     sbtaInstall := Def.uncached {
       val base = baseDirectory.value
       val jar  = base / "target" / "sbta-local" / "sbta.jar"

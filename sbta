@@ -3,8 +3,10 @@
 set +e
 declare builtin_sbt_version="2.0.8"
 # sbta: this build's own sbta jar, relative to this script (written by `sbtaInstall`).
-# Until it exists, this script is plain sbt and runs sbt's launcher.
+# Until it exists, this script is plain sbt and runs sbt's launcher, and `--mcp` runs
+# sbta from this build's classes (the classpath `sbtaDevClasspath` writes).
 declare sbta_local_jar="target/sbta-local/sbta.jar"
+declare sbta_dev_classpath="target/sbta-dev/classpath"
 declare -a residual_args
 declare -a java_args
 declare -a scalac_args
@@ -789,10 +791,17 @@ process_args () {
                   "-D*"|-D*) addJava "$1" && shift ;;
                         -J*) addJava "${1:2}" && shift ;;
                         bsp) use_sbtn=0 && addResidual "-bsp" && shift ;;
-                      --mcp) [[ -f "${sbt_bin_dir}/$sbta_local_jar" ]] || {
-                               echoerr "sbta: $sbta_local_jar isn't built yet: run ./sbta sbtaInstall"
-                               exit 1
-                             }
+                      --mcp) if [[ ! -f "${sbt_bin_dir}/$sbta_local_jar" ]]; then
+                               # No built jar (a fresh clone): run sbta from this build's classes, so
+                               # stdout stays MCP-only. The sbt this starts keeps running for sbta.
+                               shift
+                               echoerr "sbta: $sbta_local_jar isn't built yet; running sbta from this build's classes"
+                               "${sbt_bin_dir}/$(basename "$0")" --client -no-colors sbtaDevClasspath </dev/null >&2 || {
+                                 echoerr "sbta: sbtaDevClasspath failed; run ./sbta sbtaInstall"
+                                 exit 1
+                               }
+                               exec "$java_cmd" -cp "$(cat "${sbt_bin_dir}/$sbta_dev_classpath")" com.jamesward.sbta.Main --mcp "$@"
+                             fi
                              use_sbtn=0 && addResidual "--mcp" && shift ;;
                           *) addResidual "$1" && shift ;;
     esac

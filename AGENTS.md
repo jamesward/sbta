@@ -14,8 +14,10 @@ works.
 - The build's launcher is its own `./sbta` / `sbta.bat` (no `./sbt`), written by
   `./sbta sbtaInstall`: it runs the jar this build made (`target/sbta-local/sbta.jar`),
   and until that exists (a fresh clone, or after removing `target/`) it is plain sbt,
-  running sbt's launcher. So the MCP server needs one `./sbta sbtaInstall` first; run it
-  again to pick up sbta changes (restart the MCP client to use them).
+  running sbt's launcher, and its `--mcp` runs sbta from this build's classes instead
+  (`sbtaDevClasspath` compiles them and writes `target/sbta-dev/classpath`; about a minute
+  in a fresh clone), so the MCP server works without `./sbta sbtaInstall`. Restart the MCP
+  client to pick up sbta changes.
 
 ## Build, Test & Dev Workflow
 

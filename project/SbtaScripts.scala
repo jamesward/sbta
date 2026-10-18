@@ -14,7 +14,9 @@ import sbt.*
  *  - [[SbtaScripts.Local]]: this build's own `./sbta` and `./sbta.bat` (`sbtaInstall`).
  *    The jar is the one this build made, at a path relative to the script. Until it
  *    exists (a fresh clone, or after `clean`), the script is plain sbt: it downloads
- *    and runs sbt's launcher, which is how sbta is built in the first place.
+ *    and runs sbt's launcher, which is how sbta is built in the first place; and its
+ *    `--mcp` runs sbta from this build's classes (`sbtaDevClasspath`), so an MCP client
+ *    in a fresh clone gets sbta's own server without the minutes `sbtaInstall` takes.
  *
  * In both, `--mcp` runs in the JVM (never through sbtn, sbt 2's default client), and
  * sbt.bat uses sbt's JVM client when no sbtn is installed next to it. Each edit must
@@ -30,6 +32,9 @@ object SbtaScripts {
 
   sealed trait Mode
   final case class Release(version: String) extends Mode
+  /** The runtime classpath `sbtaDevClasspath` writes, relative to the build: `--mcp` without a built jar. */
+  val DevClasspath = "target/sbta-dev/classpath"
+
   /** `jar`: the sbta jar, relative to the scripts' directory, with `/` separators. */
   final case class Local(jar: String) extends Mode
 
@@ -101,8 +106,10 @@ object SbtaScripts {
         Seq(
           "declare -a residual_args\n" ->
             s"""# sbta: this build's own sbta jar, relative to this script (written by `sbtaInstall`).
-               |# Until it exists, this script is plain sbt and runs sbt's launcher.
+               |# Until it exists, this script is plain sbt and runs sbt's launcher, and `--mcp` runs
+               |# sbta from this build's classes (the classpath `sbtaDevClasspath` writes).
                |declare sbta_local_jar="$jar"
+               |declare sbta_dev_classpath="$DevClasspath"
                |declare -a residual_args
                |""".stripMargin,
           "  echo \"$(cygwinpath \"${sbt_home}/bin/sbt-launch.jar\")\"" ->
@@ -113,10 +120,17 @@ object SbtaScripts {
   fi""",
           "                        bsp) use_sbtn=0 && addResidual \"-bsp\" && shift ;;" ->
             """                        bsp) use_sbtn=0 && addResidual "-bsp" && shift ;;
-                      --mcp) [[ -f "${sbt_bin_dir}/$sbta_local_jar" ]] || {
-                               echoerr "sbta: $sbta_local_jar isn't built yet: run ./sbta sbtaInstall"
-                               exit 1
-                             }
+                      --mcp) if [[ ! -f "${sbt_bin_dir}/$sbta_local_jar" ]]; then
+                               # No built jar (a fresh clone): run sbta from this build's classes, so
+                               # stdout stays MCP-only. The sbt this starts keeps running for sbta.
+                               shift
+                               echoerr "sbta: $sbta_local_jar isn't built yet; running sbta from this build's classes"
+                               "${sbt_bin_dir}/$(basename "$0")" --client -no-colors sbtaDevClasspath </dev/null >&2 || {
+                                 echoerr "sbta: sbtaDevClasspath failed; run ./sbta sbtaInstall"
+                                 exit 1
+                               }
+                               exec "$java_cmd" -cp "$(cat "${sbt_bin_dir}/$sbta_dev_classpath")" com.jamesward.sbta.Main --mcp "$@"
+                             fi
                              use_sbtn=0 && addResidual "--mcp" && shift ;;""",
         )
     }
