@@ -49,8 +49,11 @@ final class SbtTools(server: SbtServer, log: String => Unit):
   // ---- structured tools (BuildTools.Run) ----
 
   def run(tool: String, args: Map[String, List[String]]): String =
-    def one(name: String): Option[String] = args.get(name).flatMap(_.headOption).map(_.trim).filter(_.nonEmpty)
+    def arg(name: String): Option[String] = args.get(name).flatMap(_.headOption).map(_.trim).filter(_.nonEmpty)
     try
+      // A project of another build (a `RootProject`/`ProjectRef` dependency) needs its build in the reference.
+      val project = arg("project").map(projectRef)
+      def one(name: String): Option[String] = if name == "project" then project else arg(name)
       tool match
         case "compile" =>
           val config = if one("configuration").contains("test") then "Test / " else ""
@@ -70,6 +73,33 @@ final class SbtTools(server: SbtServer, log: String => Unit):
       case NonFatal(e) => s"$tool: ${Option(e.getMessage).getOrElse(e.toString)}"
 
   private def scope(project: Option[String]): String = project.fold("")(p => s"$p / ")
+
+  @volatile private var targetsCache: Option[(Vector[String], List[Target])] = None
+
+  /** The build's targets, cached until the build definition changes (they name its projects). */
+  private def cachedTargets(): List[Target] =
+    val fingerprint = server.buildFingerprint()
+    targetsCache.collect { case (f, ts) if f == fingerprint => ts }.getOrElse {
+      val ts = server.session(targets)
+      targetsCache = Some(fingerprint -> ts)
+      ts
+    }
+
+  /**
+   * How sbt refers to project `id`: the id itself in the root build, and
+   * `{<build uri>}id` in another build (a `RootProject`/`ProjectRef` dependency), which
+   * a bare id doesn't reach ("Not a valid key"). A reference with a build is kept as given.
+   */
+  private[sbta] def projectRef(id: String): String =
+    if id.startsWith("{") then id
+    else
+      val ts =
+        try cachedTargets()
+        catch
+          case NonFatal(e) =>
+            log(s"listing the build's projects failed: ${e.getMessage}")
+            Nil
+      SbtTools.projectRef(id, ts.map(t => (t.build == rootBuild, t.buildUri, t.project)))
 
   private def action(command: String): String =
     server.session(s => actionJson(s.exec(command)).toJson)
@@ -217,6 +247,8 @@ final class SbtTools(server: SbtServer, log: String => Unit):
   /** A BSP build target: `file:/build/#project/Config`. */
   final case class Target(json: Json.Obj, uri: String, build: Path, project: String, config: String):
     def field(name: String): Option[Json] = json.get(name)
+    /** The build's URI as sbt writes it (`file:/build/`), for `{…}project` references. */
+    def buildUri: String = uri.takeWhile(_ != '#')
 
   private def targets(s: Session): List[Target] =
     val result = s.bsp("workspace/buildTargets", Json.Obj())
@@ -310,14 +342,14 @@ final class SbtTools(server: SbtServer, log: String => Unit):
     val r = s.exec("projects")
     logLines(r.output).map(_.trim).collectFirst { case line if line.startsWith("* ") => line.drop(2).trim }
 
-  /** The root build's targets of one configuration, for `project` (or every project when it's None). */
+  /** The targets of one configuration for `project` (a reference from [[projectRef]]), or the root build's when it's None. */
   private def rootTargets(s: Session, project: Option[String], config: String): List[Target] =
-    val ts = targets(s).filter(t => t.build == rootBuild && t.config == config)
+    val ts = targets(s).filter(_.config == config)
     project match
       case Some(p) =>
-        val matching = ts.filter(_.project == p)
+        val matching = ts.filter(t => (if t.build == rootBuild then t.project else s"{${t.buildUri}}${t.project}") == p)
         if matching.isEmpty then throw IllegalArgumentException(s"no project `$p` (see the `projects` tool)") else matching
-      case None => ts
+      case None => ts.filter(_.build == rootBuild)
 
   private def targetIds(ts: List[Target]): Json =
     Json.Obj("targets" -> Json.Arr(ts.map(t => Json.Obj("uri" -> Json.Str(t.uri)))*))
@@ -519,6 +551,17 @@ final class SbtTools(server: SbtServer, log: String => Unit):
     else "\"" + arg.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
 
 object SbtTools:
+
+  /**
+   * [[SbtTools.projectRef]] over `(inRootBuild, buildUri, id)` of the build's targets: the
+   * root build's project as is, another build's as `{buildUri}id` (when only one build
+   * has it), and an unknown or ambiguous id unchanged, for sbt to report.
+   */
+  def projectRef(id: String, projects: List[(Boolean, String, String)]): String =
+    if projects.exists((root, _, p) => root && p == id) then id
+    else projects.collect { case (false, build, `id`) => build }.distinct match
+      case List(build) => s"{$build}$id"
+      case _           => id
   private val LogLine = """^\[(info|warn|error|success|debug)\]""".r
   def isLogLine(line: String): Boolean = LogLine.findPrefixOf(line).isDefined
 

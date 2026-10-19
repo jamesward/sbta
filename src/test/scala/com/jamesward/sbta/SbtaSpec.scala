@@ -263,6 +263,22 @@ object SbtaSpec extends ZIOSpecDefault:
       )
     },
     updatesSuite,
+    test("a project of another build (RootProject/ProjectRef) is referred to with its build") {
+      val ps = List(
+        (true, "file:/b/root/", "root"),
+        (true, "file:/b/root/", "core"),
+        (false, "file:/b/zio-bedrock/", "zio-bedrock"),
+        (false, "file:/b/x/", "dup"),
+        (false, "file:/b/y/", "dup"),
+        (false, "file:/b/other/", "core"),
+      )
+      assertTrue(
+        SbtTools.projectRef("core", ps) == "core", // the root build's wins
+        SbtTools.projectRef("zio-bedrock", ps) == "{file:/b/zio-bedrock/}zio-bedrock",
+        SbtTools.projectRef("dup", ps) == "dup", // ambiguous: left for sbt to report
+        SbtTools.projectRef("nope", ps) == "nope",
+      )
+    },
   )
 
   // ---- updates ----

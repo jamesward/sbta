@@ -27,7 +27,8 @@ object BuildTools:
   // ---- inputs ----
 
   private final val ProjectDoc =
-    "Project id (see the `projects` tool). Default: the session's current project; " +
+    "Project id (see the `projects` tool); a project of another build (a source dependency) works by its id too, " +
+      "or as `{<build>}id` when the id isn't unique. Default: the session's current project; " +
       "an aggregating project also runs this for the projects it aggregates."
 
   enum CompileConfiguration:
