@@ -98,6 +98,24 @@ these engines started.
   notifications while waiting). Response: a result (done), `-32603` (failed, with
   sbt's message), `-33000` with an empty message (couldn't parse) or with the
   command line (cancelled). An interrupted call sends `sbt/cancelRequest {id}`.
+- **A build that fails to load** makes sbt ask "(r)etry, (q)uit, (l)ast, or (i)gnore?"
+  and read stdin. For a command of sbta's channel sbt reads that channel
+  (`sbt/readSystemIn`): sbta answers `i` (keep the build loaded before; `r` would fail
+  again, `q` would stop the shared server) and reports the command as failed, with the
+  prompt line replaced. That needs the command to be sbta's: sbt 1 reloads changed
+  build files before a command (with `ReloadOnSourceChanges`; sbt 2 by default) as a
+  command of no channel, asking on the server's own stdin, which no one can answer. So
+  on sbt 1, when the build files changed since sbt last loaded them (by sbta's
+  fingerprint), a `reload` from sbta's channel goes first, before commands and BSP
+  requests. Opening a channel must not set off sbt 1's reload either: sbta connects to
+  the socket in `active.json` without probing it first (a probe's disconnect runs a
+  command), and sends `initialize` and `sbt/attach` together, as sbt's own client does.
+  Not covered: sbt starting (`sbt --client`) on a build that doesn't load.
+  Until a load succeeds again (a `reload`, or sbt's own reload, printing "set current
+  project to"), every tool result gets a note with the last load error: sbt keeps
+  running the build it had, so results don't reflect the build-file changes. sbt 2's
+  own reload before a command (`loadp`) fails the command without asking; sbta tells
+  it from a load that started ("loading project definition from") and didn't finish.
 - **Data.** Diagnostics from BSP `build/publishDiagnostics` (sent for `sbt/exec`
   compiles too; ANSI stripped; republished for unchanged files). Test results from
   the JUnit XML sbt writes by default (`test-reports/TEST-*.xml`, newer than the
@@ -128,13 +146,25 @@ these engines started.
   aggregates are the ones not reached through another. One command per root-build
   project, cached until the build definition changes.
 - **Not covered yet:** Windows named pipes (`--mcp`).
-- **TODO: updates.** The release scripts pin their version (`sbta_version`), so a build
-  stays on it until someone downloads newer scripts. Add some kind of update check,
-  notification or updater: e.g. a cached, rate-limited check of the latest GitHub
-  release that prints a notice (and an MCP-visible hint for agents), and/or an
-  `sbta --update` that replaces `./sbta` and `sbta.bat` with the latest release's.
-  Also: `sbta.bat` doesn't check the downloaded jar's `.sha1` yet (`sbta` does, when
-  `shasum` is installed).
+- **Updates** (`Updates`). The release scripts pin their version (`sbta_version`). The
+  check: GitHub's releases API, newest semver release (no drafts, pre-releases or
+  suffixed tags), at most once a day per user (`~/.cache/sbt/boot/sbta/latest.json`,
+  `{checkedAt, latest}`; a failed check waits a day too), in a daemon thread whenever
+  the jar starts (launcher, sbt server, `--mcp`). Only a release build compares: a
+  dynver development version never gets a notice. Notices: the release `sbta` script
+  prints it from the cache (`sbtaUpdateNotice`, since sbt 2's sbtn never starts the jar
+  for a command) and sets `SBTA_UPDATE_NOTICE_SHOWN` so the jar doesn't repeat it; the
+  jar prints it otherwise (`sbta.bat`, `java -jar`). `--mcp` (`McpMain.UpdateNotes`)
+  compares the version the build's `./sbta` pins (so it stops once updated) and adds the
+  note to the instructions and, as an extra text item (never `structuredContent`), to
+  every tool result, proxied ones too. `--update` / `update-sbta` downloads `sbta`,
+  `sbta.bat` and `SHA256SUMS` from `$SBTA_RELEASES_URL` or GitHub and moves each verified
+  file into place as a new file (a running bash keeps the script it opened). cmd.exe
+  reads a batch file while running it, so from `sbta.bat` the new one is written as
+  `sbta.bat.new`, which the script moves over itself on its last line. The scripts route
+  `--update` to the JVM like `--mcp`, with `SBTA_SCRIPT_DIR` set to their directory.
+  Still to do: `sbta.bat` doesn't check the downloaded jar's `.sha1` yet (`sbta` does,
+  when `shasum` is installed).
 
 ## `check`
 

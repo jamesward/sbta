@@ -80,8 +80,10 @@ object McpMain:
     var base    = Path.of("").toAbsolutePath
     var start   = StartMode.Eager
     var docsUrl = Option("https://www.javadocs.dev/mcp")
+    var resultNotes = true
     args.foreach {
       case a if a.startsWith("--setup") => ()
+      case "--no-update-notice"                => resultNotes = false
       case a if a.startsWith("--project-dir=") => base = Path.of(a.stripPrefix("--project-dir=")).toAbsolutePath.normalize
       case "--start=eager"                     => start = StartMode.Eager
       case "--start=lazy"                      => start = StartMode.Lazy
@@ -112,21 +114,15 @@ object McpMain:
       booting.start()
 
     val mcp: McpServer[Client] =
+      val updates = UpdateNotes(base, resultNotes, log, buildNote = () => server.brokenBuildNote)
       val core = McpServer("sbta", SbtaBuildInfo.version)
-        .instructions(
-          "Tools for driving this Scala/sbt build through its sbt server. Structured build tools return data: " +
-            "`compile`, `test`, `run`, `clean`, `publish-local`, `projects`, `test-names`, `main-classes`, " +
-            "`dependencies` and `show`. `sbt-task` runs any other sbt command, and `list-tasks` lists the tasks. " +
-            "Search/inspect Scala 3 symbols read from TASTy (`glob-search`, `inspect`, `symbol-location`), and `check` " +
-            "Scala 3 sources quickly without compiling. Commands run on sbt's command loop " +
-            "one at a time (shared with any other sbt client); cancelling a call cancels its command. " +
-            "Documentation tools are proxied from javadocs.dev."
-        )
-        .tool(sbtTaskTool(tools))
-        .tool(listTasksTool(tools))
-      val withBuildTools = BuildTools.all(tools.run).foldLeft(core.tool(globSearchTool(code)).tool(inspectTool(code)).tool(locationTool(code)).tool(checkTool(code)))(_.tool(_))
+        .instructions(InstructionsSource(_ => ZIO.succeed(Some(Instructions + updates.instructionsNote.fold("")(" " + _)))))
+      val handlers =
+        List(sbtTaskTool(tools), listTasksTool(tools), globSearchTool(code), inspectTool(code), locationTool(code), checkTool(code)) ++
+          BuildTools.all(tools.run) :+ updateTool(updates)
+      val withBuildTools = handlers.map(updates.withNote).foldLeft(core)(_.tool(_))
       docsUrl match
-        case Some(url) => withBuildTools.toolSource(ProxyToolSource(url, log))
+        case Some(url) => withBuildTools.toolSource(updates.withNote(ProxyToolSource(url, log)))
         case None      => withBuildTools
 
     val runtime = Unsafe.unsafe(implicit u => Runtime.unsafe.fromLayer(Runtime.removeDefaultLoggers))
@@ -142,6 +138,100 @@ object McpMain:
       Files.createDirectories(dir)
       Some(PrintStream(FileOutputStream(dir.resolve("mcp.log").toFile, true), true, "UTF-8"))
     catch case NonFatal(_) => None
+
+  private val Instructions =
+    "Tools for driving this Scala/sbt build through its sbt server. Structured build tools return data: " +
+      "`compile`, `test`, `run`, `clean`, `publish-local`, `projects`, `test-names`, `main-classes`, " +
+      "`dependencies` and `show`. `sbt-task` runs any other sbt command, and `list-tasks` lists the tasks. " +
+      "Search/inspect Scala 3 symbols read from TASTy (`glob-search`, `inspect`, `symbol-location`), and `check` " +
+      "Scala 3 sources quickly without compiling. Commands run on sbt's command loop " +
+      "one at a time (shared with any other sbt client); cancelling a call cancels its command. " +
+      "Documentation tools are proxied from javadocs.dev. `update-sbta` updates the build's sbta scripts."
+
+  /**
+   * The notes appended (as more text items, never in `structuredContent`) to every tool
+   * result: that the build files don't load (`buildNote`, always), and that a newer sbta
+   * release is out (unless `resultNotes` is off; also in the instructions). The update
+   * note compares the version the build's `./sbta` pins (so it stops once `update-sbta`
+   * has run) with the newest release from the daily check, which is refreshed in the
+   * background when the server starts.
+   */
+  private[sbta] final class UpdateNotes(
+      base: Path,
+      resultNotes: Boolean,
+      log: String => Unit,
+      cache: Path = Updates.cacheFile,
+      env: String => Option[String] = sys.env.get,
+      buildNote: () => Option[String] = () => None,
+  ):
+    @volatile private var checked = Updates.read(cache)
+    if !Updates.checkDisabled(env) then
+      Updates.refreshInBackground(cache) { c =>
+        checked = c
+        c.flatMap(_.latest).foreach(v => log(s"newest sbta release: $v"))
+      }
+
+    def current: String = Updates.pinnedVersion(base).getOrElse(SbtaBuildInfo.version)
+
+    def note: Option[String] =
+      if Updates.noticesDisabled(env) then None
+      else Updates.newer(current, checked).map(Updates.mcpNote(current, _))
+
+    def instructionsNote: Option[String] = note
+
+    def addNote(result: CallToolResult): CallToolResult =
+      // A broken build is always noted (unless the result says so already); the update note can be turned off.
+      val build = buildNote().filterNot(_ => result.content.exists {
+        case ToolContent.Text(t, _) => t.contains("the build failed to load")
+        case _                      => false
+      })
+      val notes = build.toList ++ (if resultNotes then note.toList else Nil)
+      if notes.isEmpty then result else result.copy(content = result.content ++ notes.map(ToolContent.text))
+
+    def withNote[R](tool: McpToolHandlerR[R]): McpToolHandlerR[R] =
+      new McpToolHandlerR[R]:
+        def name: ToolName                = tool.name
+        def definition: ToolDefinition    = tool.definition
+        override def requiredScopes       = tool.requiredScopes
+        override def taskPolicy           = tool.taskPolicy
+        def call(args: Option[Json.Obj])  = tool.call(args).map(addNote)
+        override def callWithContext(args: Option[Json.Obj], ctx: McpToolContext) =
+          tool.callWithContext(args, ctx).map(addNote)
+
+    def withNote[R](source: McpToolSource[R]): McpToolSource[R] =
+      new McpToolSource[R]:
+        def listTools(ctx: McpToolContext) = source.listTools(ctx)
+        def callTool(name: ToolName, args: Option[Json.Obj], ctx: McpToolContext) =
+          source.callTool(name, args, ctx).map(addNote)
+
+    def update(version: Option[String]): Either[String, List[String]] =
+      Updates.update(
+        base,
+        version,
+        Updates.releasesBase(env),
+        () => try Updates.latestRelease(Updates.fetch(Updates.ReleasesApi)) catch case NonFatal(_) => None,
+        deferBat = false,
+      )
+
+  final case class UpdateArgs(
+      @description("The release to update to, e.g. `1.2.3`. Default: the newest release.") version: Option[String] = None
+  )
+  object UpdateArgs { given Schema[UpdateArgs] = DeriveSchema.gen[UpdateArgs] }
+
+  private def updateTool(updates: UpdateNotes): McpToolHandler =
+    McpTool("update-sbta")
+      .description(
+        "Update this build's sbta launcher scripts (`sbta` and `sbta.bat`, in the build root) to the newest sbta " +
+          "release (or `version`), checked against the release's SHA256SUMS. Only when the user agrees: it changes " +
+          "files to commit. The running MCP server keeps its version until the MCP client restarts it."
+      )
+      .annotations(destructive = OptBool.True, openWorld = OptBool.True)
+      .handle[Any, Throwable, UpdateArgs, String] { (args: UpdateArgs) =>
+        ZIO.attemptBlockingInterrupt(updates.update(args.version)).flatMap {
+          case Right(lines) => ZIO.succeed(lines.mkString("\n"))
+          case Left(error)  => ZIO.fail(RuntimeException(error))
+        }
+      }
 
   final case class GlobSearchArgs(
       @description("An unqualified name or glob (`*Service`, `Foo*`); `*` (or empty) with `inPackage` lists the package.") query: String,

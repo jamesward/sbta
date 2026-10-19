@@ -75,7 +75,19 @@ object SbtaSpec extends ZIOSpecDefault:
               command match
                 case "fail" => write(out, s"""{"jsonrpc":"2.0","id":$id,"error":{"code":-32603,"message":"(Compile / compile) Compilation failed"}}""")
                 case "slow" => running = Some(id) // answered when cancelled
+                case "reload-broken" =>
+                  // As sbt's doLoadFailed: the error and the prompt, then a read of the channel's stdin.
+                  val prompt = s"[error] build.sbt:3: error: not found: noSuchSetting\n[warn] ${Session.LoadFailedPrompt}\n"
+                    .getBytes(StandardCharsets.UTF_8).map(_.toInt).mkString(",")
+                  write(out, s"""{"jsonrpc":"2.0","method":"sbt/systemOut","params":[$prompt]}""")
+                  write(out, """{"jsonrpc":"2.0","method":"sbt/readSystemIn","params":""}""")
+                  running = Some(id)
                 case _      => write(out, s"""{"jsonrpc":"2.0","id":$id,"result":{"status":"Done","exitCode":0}}""")
+            case "sbt/systemIn" =>
+              val byte = field(m, "params").collect { case Json.Num(n) => n.intValue.toChar }.getOrElse('?')
+              seen.add(s"systemIn:$byte")
+              // (i)gnore: sbt keeps the previous build and the command completes.
+              if byte == 'i' then running.foreach(r => write(out, s"""{"jsonrpc":"2.0","id":$r,"result":{"status":"Done","exitCode":0}}"""))
             case "sbt/cancelRequest" =>
               write(out, s"""{"jsonrpc":"2.0","id":$id,"result":{"status":"Task cancelled"}}""")
               running.foreach(r => write(out, s"""{"jsonrpc":"2.0","id":$r,"error":{"code":-33000,"message":"slow"}}"""))
@@ -120,6 +132,32 @@ object SbtaSpec extends ZIOSpecDefault:
         try
           val r = s.exec("fail")
           assertTrue(!r.success, r.error.contains("(Compile / compile) Compilation failed"))
+        finally s.close()
+      }
+    },
+    test("a failed build load: sbt's retry/quit prompt is answered with (i)gnore, and the command fails with the load error") {
+      withBuild { dir =>
+        val (socket, seen) = fakeSbt(dir)
+        val server = SbtServer(dir, StartMode.Never, _ => ())
+        val s = Session.open(server, socket, _ => ())
+        try
+          val r      = s.exec("reload-broken")
+          val noted  = server.brokenBuildNote
+          val next   = s.exec("compile")
+          val still  = server.brokenBuildNote
+          val reload = s.exec("reload")
+          assertTrue(
+            seen.contains("systemIn:i"),
+            !r.success,
+            r.error.exists(e => e.contains("the build failed to load") && e.contains("not found: noSuchSetting")),
+            r.output.contains("not found: noSuchSetting"),
+            !r.output.contains("(r)etry"),
+            next.success, // the flag is per command
+            noted.exists(_.contains("not found: noSuchSetting")),
+            still == noted, // noted on every result until the build loads
+            reload.success,
+            server.brokenBuildNote.isEmpty,
+          )
         finally s.close()
       }
     },
@@ -223,5 +261,176 @@ object SbtaSpec extends ZIOSpecDefault:
         SbtServer.socketOf("tcp://127.0.0.1:5000").isEmpty,
         Text.stripAnsi("\u001b[31m-- Error\u001b[0m [1m=> Obtained[0m\r\n") == "-- Error => Obtained\n",
       )
+    },
+    updatesSuite,
+  )
+
+  // ---- updates ----
+
+  private def v(s: String) = Updates.Version.parse(s).get
+
+  private def releasesJson(tags: (String, Boolean, Boolean)*): String =
+    tags.map((tag, draft, pre) => s"""{"tag_name":"$tag","draft":$draft,"prerelease":$pre}""").mkString("[", ",", "]")
+
+  /** A release script pinning `version`, as `declare sbta_version=` in the real one. */
+  private def releaseScript(version: String) = s"#!/usr/bin/env bash\ndeclare sbta_version=\"$version\"\n"
+
+  /** `<dir>/v<version>/{sbta,sbta.bat,SHA256SUMS}`, as a release has them; returns its `file:` URL. */
+  private def releases(dir: Path, version: String, corruptBat: Boolean = false): String =
+    val at = dir.resolve(s"v$version")
+    Files.createDirectories(at)
+    val sbta = releaseScript(version).getBytes(StandardCharsets.UTF_8)
+    val bat  = s"@echo off\r\nset sbta_version=$version\r\n".getBytes(StandardCharsets.UTF_8)
+    Files.write(at.resolve("sbta"), sbta)
+    Files.write(at.resolve("sbta.bat"), if corruptBat then "tampered".getBytes(StandardCharsets.UTF_8) else bat)
+    Files.writeString(at.resolve("SHA256SUMS"), s"${Updates.sha256(sbta)}  sbta\n${Updates.sha256(bat)}  sbta.bat\n")
+    dir.toUri.toString
+
+  private val noCheck: String => Option[String] = Map("SBTA_NO_UPDATE_CHECK" -> "1").get
+
+  private def updatesSuite = suite("updates")(
+    test("semver: only releases, newest by precedence (0.10.0 after 0.9.9, a release after its pre-releases)") {
+      // The precedence example of the semver spec, shuffled.
+      val spec   = List("1.0.0-alpha", "1.0.0-alpha.1", "1.0.0-alpha.beta", "1.0.0-beta", "1.0.0-beta.2", "1.0.0-beta.11", "1.0.0-rc.1", "1.0.0")
+      val sorted = (List("0.10.0", "0.9.9") ++ scala.util.Random(1).shuffle(spec)).map(v).sorted.map(_.toString)
+      assertTrue(
+        sorted == "0.9.9" :: "0.10.0" :: spec,
+        Updates.Version.parse("v1.2.3").contains(Updates.Version(1, 2, 3, None)),
+        Updates.Version.parse("1.2").isEmpty,
+        Updates.Version.parse("0.0.2-3-c76eefc9-20261018").exists(!_.isRelease), // a dynver development build
+        Updates.latestRelease(
+          releasesJson(("v0.9.0", false, false), ("v0.10.0", false, false), ("v0.11.0", true, false), ("v0.12.0", false, true),
+            ("v0.13.0-RC1", false, false), ("nightly", false, false))
+        ).contains(v("0.10.0")),
+        Updates.latestRelease("not json").isEmpty,
+      )
+    },
+    test("the check runs at most once a day, and a failed one keeps what the last found") {
+      withBuild { dir =>
+        val file  = dir.resolve("latest.json")
+        var calls = 0
+        def fetch(json: String) = () => { calls += 1; json }
+        val day   = Updates.CheckInterval
+        val first = Updates.refresh(file, 1000, fetch(releasesJson(("v0.1.0", false, false))))
+        val same  = Updates.refresh(file, 1000 + day - 1, fetch(releasesJson(("v0.2.0", false, false))))
+        val failed = Updates.refresh(file, 1000 + day, () => { calls += 1; throw java.io.IOException("offline") })
+        val later  = Updates.refresh(file, 1000 + 2 * day, fetch(releasesJson(("v0.2.0", false, false))))
+        val stored = Updates.read(file)
+        assertTrue(
+          first.flatMap(_.latest).contains("0.1.0"),
+          same.flatMap(_.latest).contains("0.1.0"),
+          failed.contains(Updates.Checked(1000 + day, Some("0.1.0"))),
+          later.flatMap(_.latest).contains("0.2.0"),
+          calls == 3,
+          stored == later,
+        )
+      }
+    },
+    test("a notice only for a newer release than a release build, and switches to turn it off") {
+      val checked = Some(Updates.Checked(0, Some("0.3.0")))
+      assertTrue(
+        Updates.newer("0.2.9", checked).contains(v("0.3.0")),
+        Updates.newer("0.3.0", checked).isEmpty,
+        Updates.newer("0.4.0", checked).isEmpty,
+        Updates.newer("0.2.9-4-abcd1234", checked).isEmpty, // development builds
+        Updates.newer("0.2.9", None).isEmpty,
+        Updates.notice("0.2.9", v("0.3.0")).contains("./sbta --update"),
+        Updates.checkDisabled(Map("CI" -> "true").get),
+        Updates.checkDisabled(Map("SBTA_NO_UPDATE_CHECK" -> "1").get),
+        !Updates.checkDisabled(Map.empty[String, String].get),
+        Updates.noticesDisabled(Map("SBTA_NO_UPDATE_NOTICE" -> "1").get),
+      )
+    },
+    test("--update replaces sbta and sbta.bat with a release's, checked against its SHA256SUMS") {
+      withBuild { dir =>
+        val repo = releases(dir.resolve("repo"), "0.3.0")
+        Files.writeString(dir.resolve("sbta"), releaseScript("0.2.0"))
+        Files.writeString(dir.resolve("sbta.bat"), "old")
+        val result = Updates.update(dir, None, repo, () => Some(v("0.3.0")), deferBat = false)
+        val again  = Updates.update(dir, Some("0.3.0"), repo, () => None, deferBat = false)
+        val pinned = Updates.pinnedVersion(dir)
+        val bat    = Files.readString(dir.resolve("sbta.bat"))
+        val executable = SbtServer.windows || Files.isExecutable(dir.resolve("sbta"))
+        assertTrue(
+          result.exists(_.head == "updated sbta and sbta.bat from 0.2.0 to 0.3.0"),
+          pinned.contains("0.3.0"),
+          executable,
+          bat.contains("set sbta_version=0.3.0"),
+          again == Right(List("sbta and sbta.bat are already 0.3.0")),
+        )
+      }
+    },
+    test("--update changes nothing when a file doesn't match SHA256SUMS, and refuses a non-release script") {
+      withBuild { dir =>
+        val repo = releases(dir.resolve("repo"), "0.3.0", corruptBat = true)
+        Files.writeString(dir.resolve("sbta"), releaseScript("0.2.0"))
+        val tampered = Updates.update(dir, Some("0.3.0"), repo, () => None, deferBat = false)
+        val pinned   = Updates.pinnedVersion(dir)
+        val missing  = Updates.update(dir, Some("9.9.9"), repo, () => None, deferBat = false)
+        Files.writeString(dir.resolve("sbta"), "#!/usr/bin/env bash\ndeclare sbta_local_jar=\"x.jar\"\n")
+        val local = Updates.update(dir, Some("0.3.0"), repo, () => None, deferBat = false)
+        assertTrue(
+          tampered.left.exists(_.contains("sbta.bat of 0.3.0 doesn't match its SHA256SUMS")),
+          pinned.contains("0.2.0"),
+          missing.isLeft,
+          local.left.exists(_.contains("no release sbta script")),
+        )
+      }
+    },
+    test("--update from a running sbta.bat leaves the new one as sbta.bat.new, for the script to move into place") {
+      withBuild { dir =>
+        val repo = releases(dir.resolve("repo"), "0.3.0")
+        Files.writeString(dir.resolve("sbta"), releaseScript("0.2.0"))
+        Files.writeString(dir.resolve("sbta.bat"), "old")
+        val result = Updates.update(dir, Some("0.3.0"), repo, () => None, deferBat = true)
+        val bat    = Files.readString(dir.resolve("sbta.bat"))
+        val next   = Files.readString(dir.resolve("sbta.bat.new"))
+        assertTrue(result.isRight, bat == "old", next.contains("0.3.0"))
+      }
+    },
+    test("MCP: the note is added to every tool result (not structuredContent), unless turned off, until the build is updated") {
+      import com.jamesward.ziohttp.mcp.*
+      withBuild { dir =>
+        Files.writeString(dir.resolve("sbta"), releaseScript("0.2.0"))
+        val cache = dir.resolve("latest.json")
+        Files.writeString(cache, """{"checkedAt":0,"latest":"0.3.0"}""")
+        val on     = McpMain.UpdateNotes(dir, resultNotes = true, _ => (), cache, noCheck)
+        val off    = McpMain.UpdateNotes(dir, resultNotes = false, _ => (), cache, noCheck)
+        val muted  = McpMain.UpdateNotes(dir, resultNotes = true, _ => (), cache, Map("SBTA_NO_UPDATE_CHECK" -> "1", "SBTA_NO_UPDATE_NOTICE" -> "1").get)
+        val result = CallToolResult(content = zio.Chunk(ToolContent.text("ok")), structuredContent = Some(Json.Obj("a" -> Json.Num(1))))
+        val noted  = on.addNote(result)
+        val instructions = on.instructionsNote
+        val (offResult, offInstructions, mutedResult) = (off.addNote(result), off.instructionsNote, muted.addNote(result))
+        Files.writeString(dir.resolve("sbta"), releaseScript("0.3.0"))
+        val afterUpdate = on.addNote(result)
+        assertTrue(
+          noted.content.size == 2,
+          noted.content.last == ToolContent.text(Updates.mcpNote("0.2.0", v("0.3.0"))),
+          noted.structuredContent == result.structuredContent,
+          instructions.exists(_.contains("update-sbta")),
+          offResult == result,
+          offInstructions.isDefined,
+          mutedResult == result,
+          afterUpdate == result,
+        )
+      }
+    },
+    test("MCP: a broken build is noted on every tool result, also with the update note off, unless the result says so") {
+      import com.jamesward.ziohttp.mcp.*
+      withBuild { dir =>
+        var broken: Option[String] = Some("The build files don't load: x")
+        val notes  = McpMain.UpdateNotes(dir, resultNotes = false, _ => (), dir.resolve("latest.json"), noCheck, () => broken)
+        val result = CallToolResult(content = zio.Chunk(ToolContent.text("ok")))
+        val failed = CallToolResult(content = zio.Chunk(ToolContent.text("[error] reload: the build failed to load; …")))
+        val noted       = notes.addNote(result)
+        val notRepeated = notes.addNote(failed)
+        broken = None
+        val fixed = notes.addNote(result)
+        assertTrue(
+          noted.content.last == ToolContent.text("The build files don't load: x"),
+          notRepeated == failed,
+          fixed == result,
+        )
+      }
     },
   )

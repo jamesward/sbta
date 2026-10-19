@@ -33,6 +33,8 @@ object LauncherSpec extends ZIOSpecDefault:
     // Set by sbt for the processes it forks (this test JVM): sbt in a child would take its
     // terminal from it instead of reading stdin.
     builder.environment().remove("SBT_TERMINAL_PROPS")
+    // No daily update check against GitHub from the specs' sbta (and sbt servers it starts).
+    builder.environment().put("SBTA_NO_UPDATE_CHECK", "1")
     env.foreach((k, v) => builder.environment().put(k, v))
     val process = builder.start()
     val stdin   = process.getOutputStream
@@ -190,6 +192,9 @@ object LauncherSpec extends ZIOSpecDefault:
         assertTrue(sbtaAnswered)
       },
       everyTool(dir),
+      reloadThroughSbtTask(dir),
+      failedReloadThroughSbtTask(sbtVersion),
+      updateThroughScript(sbtVersion),
     ) @@ TestAspect.sequential @@ TestAspect.afterAll(ZIO.succeed {
       script(dir, List("--client", "shutdown"), timeoutSeconds = 60)
       deleteRecursively(dir)
@@ -272,6 +277,157 @@ object LauncherSpec extends ZIOSpecDefault:
       }
     } @@ TestAspect.ifProp("os.name")(!_.toLowerCase.contains("win"))
 
+  /**
+   * `reload` through `sbt-task` answers (it reloads the build sbt's server runs, so the
+   * command's result must still reach sbta), and the server keeps answering afterwards.
+   */
+  private def reloadThroughSbtTask(dir: Path) =
+    test("sbt-task runs `reload`, returns, and the next call still works") {
+      ZIO.attemptBlocking {
+        val mcp = McpProcess.start(
+          dir,
+          List(Path.of(java.lang.System.getProperty("java.home"), "bin", "java").toString, "-jar", jar.toString, "--mcp", "--docs-url=none"),
+          Map("SBTA_RELEASES_URL" -> repo.toUri.toString),
+        )
+        try
+          mcp.send("""{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"spec","version":"1"}}}""")
+          mcp.send("""{"jsonrpc":"2.0","method":"notifications/initialized"}""")
+          mcp.response(1, 60)
+          // Warm up first, so the timeout below measures `reload`, not starting sbt.
+          mcp.send("""{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"sbt-task","arguments":{"command":"leaf/name"}}}""")
+          val before = mcp.response(2, 300)
+          mcp.send("""{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"sbt-task","arguments":{"command":"reload"}}}""")
+          val reload = mcp.response(3, 120)
+          mcp.send("""{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"sbt-task","arguments":{"command":"app/name"}}}""")
+          val after = mcp.response(4, 120)
+          (before, reload, after)
+        finally mcp.close()
+      }.map { case (before, reload, after) =>
+        def text(r: Option[Json]) = r.map(_.toJson).getOrElse("")
+        def ok(r: Option[Json])   = r.isDefined && !r.flatMap(path(_, "result", "isError")).contains(Json.Bool(true)) && r.flatMap(path(_, "error")).isEmpty
+        assertTrue(
+          ok(before),
+          reload.isDefined, // no response within the timeout: the hang
+          ok(reload),
+          text(reload).contains("[ok] reload"),
+          ok(after),
+          text(after).contains("app"),
+        )
+      }
+    } @@ TestAspect.ifProp("os.name")(!_.toLowerCase.contains("win"))
+
+  /**
+   * A `reload` whose build fails to load comes back as an error, rather than sbt
+   * waiting for an answer to "Project loading failed: (r)etry, (q)uit, (l)ast, or
+   * (i)gnore?" on sbta's attached terminal, which never gives it input. Its own build,
+   * so an sbt stuck at the prompt can't break the other tests.
+   */
+  private def failedReloadThroughSbtTask(sbtVersion: String) =
+    test("sbt-task `reload` of a build that fails to load, or a command after a broken edit, returns an error, not sbt's retry/quit prompt") {
+      val dir      = build(sbtVersion)
+      val buildSbt = dir.resolve("build.sbt")
+      // sbt 1 reloads changed build files before a command only with this (sbt 2 by default).
+      val good     = Files.readString(buildSbt) + "Global / onChangedBuildSource := ReloadOnSourceChanges\n"
+      Files.writeString(buildSbt, good)
+      def call(mcp: McpProcess, id: Int, command: String, timeoutSeconds: Long) =
+        mcp.send(s"""{"jsonrpc":"2.0","id":$id,"method":"tools/call","params":{"name":"sbt-task","arguments":{"command":"$command"}}}""")
+        val response = mcp.response(id, timeoutSeconds)
+        // Still waiting: cancel the call (and its command) so the rest of the test can run.
+        if response.isEmpty then mcp.send(s"""{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":$id}}""")
+        response
+      ZIO.attemptBlocking {
+        val mcp = McpProcess.start(
+          dir,
+          List(Path.of(java.lang.System.getProperty("java.home"), "bin", "java").toString, "-jar", jar.toString, "--mcp", "--docs-url=none"),
+          Map("SBTA_RELEASES_URL" -> repo.toUri.toString),
+        )
+        try
+          mcp.send("""{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"spec","version":"1"}}}""")
+          mcp.send("""{"jsonrpc":"2.0","method":"notifications/initialized"}""")
+          mcp.response(1, 60)
+          val before = call(mcp, 2, "leaf/name", 300) // starts sbt with the good build
+          Files.writeString(buildSbt, good + "lazy val broken = project.settings(noSuchSetting := 1)\n")
+          val failed = call(mcp, 3, "reload", 120)
+          // Another broken edit, then a command: sbt reloads the changed build before it.
+          Files.writeString(buildSbt, good + "lazy val broken = project.settings(noSuchSetting2 := 1)\n")
+          val command = call(mcp, 4, "leaf/name", 120)
+          // sbt is still up, on the build it had: other tools answer, with a note that the build files don't load.
+          mcp.send("""{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"show","arguments":{"key":"leaf / name"}}}""")
+          val show = mcp.response(6, 120)
+          Files.writeString(buildSbt, good)
+          val recovered = call(mcp, 5, "reload", 120)
+          mcp.send("""{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"show","arguments":{"key":"leaf / name"}}}""")
+          val after = mcp.response(7, 120)
+          (before, failed, command, show, recovered, after)
+        finally
+          mcp.close()
+          Files.writeString(buildSbt, good)
+          stopSbt(dir)
+          deleteRecursively(dir)
+      }.map { case (before, failed, command, show, recovered, after) =>
+        def text(r: Option[Json]) = r.map(_.toJson).getOrElse("")
+        assertTrue(
+          text(before).contains("[ok] leaf/name"),
+          failed.isDefined, // no response within the timeout: sbt is waiting at its prompt
+          text(failed).contains("[error] reload"),
+          text(failed).contains("noSuchSetting"), // the load error, for the agent to fix
+          !text(failed).contains("(r)etry"),
+          command.isDefined,
+          text(command).contains("[error] leaf/name"),
+          text(command).contains("noSuchSetting2"),
+          text(show).contains("leaf"),
+          text(show).contains("The build files don't load"),
+          text(show).contains("noSuchSetting2"),
+          text(recovered).contains("[ok] reload"),
+          text(after).contains("leaf"),
+          !text(after).contains("The build files don't load"),
+        )
+      }
+    } @@ TestAspect.ifProp("os.name")(!_.toLowerCase.contains("win"))
+
+  /**
+   * Shut down `dir`'s sbt server; if it doesn't answer (stuck at a prompt), kill the
+   * JVMs running in `dir` (found through `/proc`, so only on Linux).
+   */
+  private def stopSbt(dir: Path): Unit =
+    val ran = run(dir, scriptCommand(dir) ++ List("--client", "shutdown"), env = Map("SBTA_RELEASES_URL" -> repo.toUri.toString), timeoutSeconds = 30)
+    if ran.exitCode != 0 then
+      val real = dir.toRealPath()
+      ProcessHandle.allProcesses().filter { p =>
+        try Path.of(s"/proc/${p.pid}/cwd").toRealPath() == real catch case scala.util.control.NonFatal(_) => false
+      }.forEach(_.destroyForcibly())
+
+  /**
+   * `./sbta --update <version>` (and `sbta.bat`, on Windows, which moves its own
+   * replacement into place last) replaces both scripts with the release's, from
+   * `$SBTA_RELEASES_URL`. The "new release" is this one's scripts pinning 99.0.0.
+   */
+  private def updateThroughScript(sbtVersion: String) =
+    test("the script's --update replaces sbta and sbta.bat with a release's, checked against SHA256SUMS") {
+      val dir  = build(sbtVersion)
+      val next = repo.resolve("v99.0.0")
+      Files.createDirectories(next)
+      val sbta = Files.readString(scripts.resolve("sbta")).replace(s"""declare sbta_version="$version"""", """declare sbta_version="99.0.0"""")
+      val bat  = Files.readString(scripts.resolve("sbta.bat")).replace(s"set sbta_version=$version", "set sbta_version=99.0.0")
+      Files.writeString(next.resolve("sbta"), sbta)
+      Files.writeString(next.resolve("sbta.bat"), bat)
+      def sha256(text: String) = java.security.MessageDigest.getInstance("SHA-256").digest(text.getBytes(StandardCharsets.UTF_8)).map(b => f"$b%02x").mkString
+      Files.writeString(next.resolve("SHA256SUMS"), s"${sha256(sbta)}  sbta\n${sha256(bat)}  sbta.bat\n")
+      try
+        val ran = script(dir, List("--update", "99.0.0"), timeoutSeconds = 120)
+        val (newSbta, newBat) = (Files.readString(dir.resolve("sbta")), Files.readString(dir.resolve("sbta.bat")))
+        assertTrue(
+          ran.exitCode == 0,
+          ran.output.contains(s"updated sbta and sbta.bat from $version to 99.0.0"),
+          newSbta == sbta,
+          newBat == bat,
+          !Files.exists(dir.resolve("sbta.bat.new")),
+        )
+      finally
+        deleteRecursively(next)
+        deleteRecursively(dir)
+    }
+
   private def path(json: Json, fields: String*): Option[Json] =
     fields.foldLeft(Option(json))((j, f) => j.flatMap(_.asObject).flatMap(_.get(f)))
 
@@ -314,5 +470,6 @@ object LauncherSpec extends ZIOSpecDefault:
     def start(dir: Path, command: List[String], env: Map[String, String]): McpProcess =
       val builder = ProcessBuilder(command*).directory(dir.toFile).redirectError(ProcessBuilder.Redirect.DISCARD)
       builder.environment().remove("SBT_TERMINAL_PROPS")
+      builder.environment().put("SBTA_NO_UPDATE_CHECK", "1")
       env.foreach((k, v) => builder.environment().put(k, v))
       McpProcess(builder.start())

@@ -83,7 +83,28 @@ object SbtaScripts {
       case Release(version) =>
         Seq(
           "declare -a residual_args\n" ->
-            s"# sbta: the launcher jar this script runs (instead of sbt-launch), from its GitHub release\ndeclare sbta_version=\"$version\"\ndeclare sbta_releases=\"$Releases\"\ndeclare -a residual_args\n",
+            s"""# sbta: the launcher jar this script runs (instead of sbt-launch), from its GitHub release
+               |declare sbta_version="$version"
+               |declare sbta_releases="$Releases"
+               |declare sbta_no_notice=
+               |declare -a residual_args
+               |
+               |# sbta: say when a newer sbta release is out, from the daily check sbta makes
+               |# (~/.cache/sbt/boot/sbta/latest.json); SBTA_NO_UPDATE_NOTICE turns it off. The
+               |# script says it, as sbt 2's sbtn never starts sbta for a command; the jar doesn't.
+               |sbtaUpdateNotice() {
+               |  export SBTA_UPDATE_NOTICE_SHOWN=1
+               |  [[ -n "$$SBTA_NO_UPDATE_NOTICE" || -n "$$sbta_no_notice" ]] && return 0
+               |  [[ "$$sbta_version" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+$$ ]] || return 0
+               |  local cache="$${user_home:-$$HOME}/.cache/sbt/boot/sbta/latest.json" latest newest
+               |  [[ -f "$$cache" ]] || return 0
+               |  latest="$$(sed -n 's/.*"latest" *: *"\\([0-9][0-9]*\\.[0-9][0-9]*\\.[0-9][0-9]*\\)".*/\\1/p' "$$cache")"
+               |  [[ -n "$$latest" && "$$latest" != "$$sbta_version" ]] || return 0
+               |  newest="$$(printf '%s\\n%s\\n' "$$sbta_version" "$$latest" | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)"
+               |  [[ "$$newest" == "$$latest" ]] || return 0
+               |  echoerr "[info] sbta $$latest is available (this build uses $$sbta_version): run ./sbta --update, then commit sbta and sbta.bat"
+               |}
+               |""".stripMargin,
           "echo \"$(cygwinpath \"${sbt_home}/bin/sbt-launch.jar\")\"" -> "echo \"$(cygwinpath \"${sbt_home}/bin/sbta.jar\")\"",
           "  local repo_base=\"$SBT_LAUNCH_REPO\"" -> "  local repo_base=\"${SBTA_RELEASES_URL:-$sbta_releases}\"",
           // repo_base is always set (no Maven Central fallback), so drop the default's `if`.
@@ -100,7 +121,11 @@ object SbtaScripts {
             "download_jar=\"${user_home:-$HOME}/.cache/sbt/boot/sbta/$launcher_sv/sbta-$launcher_sv.jar\"",
           "    dlog \"downloading sbt launcher $launcher_sv\"" -> "    dlog \"downloading sbta $launcher_sv\"",
           "                        bsp) use_sbtn=0 && addResidual \"-bsp\" && shift ;;" ->
-            "                        bsp) use_sbtn=0 && addResidual \"-bsp\" && shift ;;\n                      --mcp) use_sbtn=0 && addResidual \"--mcp\" && shift ;;",
+            """                        bsp) use_sbtn=0 && addResidual "-bsp" && shift ;;
+                      --mcp) use_sbtn=0 && sbta_no_notice=1 && addResidual "--mcp" && shift ;;
+         --update|--update=*) use_sbtn=0 && sbta_no_notice=1 && export SBTA_SCRIPT_DIR="$sbt_bin_dir" && addResidual "$1" && shift ;;""",
+          "if [[ \"$(isRunClient)\" == \"true\" ]] && [[ -z \"$print_version\" ]]; then" ->
+            "sbtaUpdateNotice\n\nif [[ \"$(isRunClient)\" == \"true\" ]] && [[ -z \"$print_version\" ]]; then",
         )
       case Local(jar) =>
         Seq(
@@ -187,8 +212,33 @@ set "sbta_url=!sbta_repo!/org/scala-sbt/sbt-launch/!init_sbt_version!/sbt-launch
 goto sbta_download
 """
     }
+    val updateArg = mode match {
+      case Release(_) =>
+        """rem sbta: --update replaces this script and sbta (in this directory) in the JVM
+if "%~0" == "--update" (
+  set sbt_args_client=0
+  set "SBTA_SCRIPT_DIR=!SBT_BIN_DIR!"
+  set "SBT_ARGS=!SBT_ARGS! --update"
+  goto args_loop
+)
+
+"""
+      case Local(_) => ""
+    }
+    // cmd.exe reads a batch file while it runs it: --update leaves the new one as
+    // sbta.bat.new, moved into place on this script's last line.
+    val updateMove = mode match {
+      case Release(_) =>
+        """if ERRORLEVEL 1 goto error
+rem sbta: --update wrote the new sbta.bat next to this one; replace this script last
+if exist "!SBT_BIN_DIR!sbta.bat.new" move /Y "!SBT_BIN_DIR!sbta.bat.new" "!SBT_BIN_DIR!sbta.bat" >nul & goto end
+goto end
+"""
+      case Local(_) => "if ERRORLEVEL 1 goto error\ngoto end\n"
+    }
     Seq(
       "set sbt_default_mem=" -> header,
+      "call :run\n\nif ERRORLEVEL 1 goto error\ngoto end\n" -> s"call :run\n\n$updateMove",
       "if \"%~0\" == \"--client\" set _client_arg=true\n" ->
         s"""rem sbta: --mcp runs in the JVM (like --server), never through sbtn
 if "%~0" == "--mcp" (
@@ -197,7 +247,7 @@ $mcpCheck  set sbt_args_client=0
   goto args_loop
 )
 
-if "%~0" == "--client" set _client_arg=true
+${updateArg}if "%~0" == "--client" set _client_arg=true
 """,
       "if !run_native_client! equ 1 if not defined sbt_args_print_version (" ->
         """rem sbta: sbt.bat runs the sbtn installed next to it; a script committed to a build

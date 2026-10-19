@@ -46,6 +46,19 @@ release and commit them to the build, like `./sbt`. The jar needs JDK 17+.
 `$SBTA_RELEASES_URL` replaces `https://github.com/jamesward/sbta/releases/download`
 (for a mirror with the same `v<version>/sbta-<version>.jar` layout).
 
+## Updates
+
+The scripts pin their sbta version, so updating is a change to commit:
+`./sbta --update` replaces `sbta` and `sbta.bat` with the newest release's (or
+`./sbta --update <version>`), checked against the release's `SHA256SUMS`.
+
+sbta checks GitHub for the newest release (semver, releases only) at most once a day,
+in the background, and says when there's a newer one: on stderr when you run `./sbta`,
+and over MCP in the server's instructions and as a note on every tool result, for the
+agent to pass on (it can update with the `update-sbta` tool). `--no-update-notice`
+(an `--mcp` option) drops the note from tool results; `SBTA_NO_UPDATE_NOTICE=1` turns
+the notices off, and `SBTA_NO_UPDATE_CHECK=1` (or `CI=true`) the check.
+
 ## MCP
 
 `./sbta --mcp --setup kiro|claude|cursor` writes this (as the agent setup does), into
@@ -81,13 +94,15 @@ Clients start project servers in the project's root directory; elsewhere, add
 | `sbt-task`, `list-tasks` | Run any sbt command line; list the tasks |
 | `check` | Type-check Scala 3 files without compiling, with the module's own compiler (warm, in sbta), never waiting behind sbt |
 | `glob-search`, `inspect`, `symbol-location` | Scala 3 symbols from TASTy (3.3–3.10): search, members, source location |
+| `update-sbta` | Update the build's `sbta` and `sbta.bat` to the newest (or a given) release |
 
 Plus the [javadocs.dev](https://www.javadocs.dev/mcp) tools, proxied. Commands run on
 sbt's command loop one at a time, shared with any other sbt client; cancelling a call
 cancels its command.
 
 Options: `--project-dir=<dir>`, `--start=eager|lazy|never` (start sbt right away, on
-the first call that needs it, or never), `--docs-url=<url>|none`, `--setup <clients>`. Logs:
+the first call that needs it, or never), `--docs-url=<url>|none`, `--setup <clients>`,
+`--no-update-notice`. Logs:
 `project/target/sbta/mcp.log` and `project/target/sbta/boot.log`.
 
 `--mcp` needs Unix domain sockets: not on Windows yet (sbt's server is a named pipe
@@ -97,7 +112,8 @@ there). Everything else works on Windows with `sbta.bat`.
 
 sbta connects only to sbt's own server socket, which only your user can open. The
 tools run arbitrary build code (`sbt-task`, `run`, `show`). The docs proxy makes
-outbound requests to javadocs.dev; `--docs-url=none` turns it off.
+outbound requests to javadocs.dev; `--docs-url=none` turns it off. The daily update
+check calls the GitHub API (`api.github.com`); `SBTA_NO_UPDATE_CHECK=1` turns it off.
 
 ## Development
 

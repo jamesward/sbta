@@ -48,16 +48,70 @@ final class SbtServer(val base: Path, start: StartMode, log: String => Unit):
         List(activeFile)
     candidates.sorted.map(p => s"$p\u0000${try Files.getLastModifiedTime(p).toMillis catch case NonFatal(_) => -1L}").toVector
 
-  /** The live server's socket, or None (not running, or `active.json` is stale). */
-  def socket(): Option[Path] =
-    try
-      if !Files.isRegularFile(activeFile) then None
+  /**
+   * The build files as sbt last loaded them (as far as sbta knows): the fingerprint of
+   * this channel's last (re)load, or, for a server sbta hasn't reloaded, its start.
+   */
+  @volatile private var loadedFingerprint: Option[Vector[String]] = None
+
+  private[sbta] def loaded(fingerprint: Vector[String]): Unit = loadedFingerprint = Some(fingerprint)
+
+  /** The last load's error, while the build files don't load (and the server that failed to load them runs). */
+  @volatile private var broken: Option[(Option[String], String)] = None
+
+  private def startedAt: Option[String] = buildFingerprint().find(_.startsWith(activeFile.toString + "\u0000"))
+
+  private[sbta] def loadFailed(errors: String): Unit = broken = Some(startedAt -> errors)
+  private[sbta] def loadSucceeded(): Unit = broken = None
+
+  /**
+   * For every tool result while the build files don't load: sbt keeps running the build
+   * it had loaded, so results don't reflect the build-file changes.
+   */
+  def brokenBuildNote: Option[String] =
+    broken.filter(_._1 == startedAt).map { (_, errors) =>
+      "The build files don't load, so sbt is still using the build it loaded before they changed " +
+        "(results don't reflect the build-file changes). Fix them, then run `reload` (sbt-task)." +
+        (if errors.isEmpty then "" else s" The load error:\n$errors")
+    }
+
+  /**
+   * Whether to `reload` from this channel before `commandLine` (or a BSP request). sbt 1,
+   * with `onChangedBuildSource := ReloadOnSourceChanges`, reloads changed build files
+   * itself before a command, but as a command of no channel (sbt 2 keeps the
+   * command's): a failed load then asks "(r)etry, (q)uit, (l)ast, or (i)gnore?" on the
+   * server's own stdin, which nobody can answer, and sbt hangs. Reloading first, from
+   * this channel, makes sbt ask here instead (see [[Session]]), and leaves sbt nothing
+   * to reload. sbt 1 can't report `onChangedBuildSource` without running a command
+   * (which would set off its reload), so on sbt 1 changed build files are always
+   * reloaded first, also when the build only warns about them. sbt 2 is left alone.
+   */
+  private[sbta] def reloadFirst(commandLine: String): Boolean =
+    if SbtServer.reloads(commandLine) then false
+    else
+      val current  = buildFingerprint()
+      val active   = activeFile.toString + "\u0000"
+      def started(fp: Vector[String]) = fp.find(_.startsWith(active))
+      def millis(entry: String) = entry.split('\u0000').lift(1).flatMap(_.toLongOption)
+      val baseline = loadedFingerprint.filter(fp => started(fp) == started(current)).getOrElse {
+        // Not reloaded by sbta since this server started (`active.json` is written then).
+        val since = started(current).flatMap(millis).getOrElse(Long.MaxValue)
+        val changedSinceStart = current.filterNot(_.startsWith(active)).exists(e => millis(e).exists(_ > since))
+        if changedSinceStart then Vector.empty else current
+      }
+      if baseline == current then
+        loadedFingerprint = Some(current)
+        false
       else
-        Files.readString(activeFile, StandardCharsets.UTF_8).fromJson[Json].toOption
-          .flatMap(_.asObject).flatMap(_.get("uri")).collect { case Json.Str(uri) => uri }
-          .flatMap(SbtServer.socketOf)
-          .filter(SbtServer.accepts)
-    catch case NonFatal(_) => None
+        // sbt 1 can't say what `onChangedBuildSource` is without running a command (it has
+        // no JSON for it), and any command would trigger its reload: reload either way.
+        val sbt1 = SbtServer.sbtVersion(base).forall(_.startsWith("1."))
+        if !sbt1 then loadedFingerprint = Some(current) // sbt 2 reloads from the command's channel
+        else log("build files changed: reloading from sbta's channel first (sbt 1 would reload them from no channel)")
+        sbt1
+
+  /** The live server's socket, or None (not running, or `active.json` is stale). */
+  def socket(): Option[Path] = activeSocket().filter(SbtServer.accepts)
 
   /** The server's socket, starting sbt first when it isn't running (and starting is allowed). */
   def ensureRunning(): Path = synchronized {
@@ -71,11 +125,35 @@ final class SbtServer(val base: Path, start: StartMode, log: String => Unit):
     }
   }
 
-  /** Run `f` on a fresh connection to the server: one sbt channel per call, closed afterwards. */
+  /**
+   * Run `f` on a fresh connection to the server: one sbt channel per call, closed afterwards.
+   * It connects to the socket `active.json` names without probing it first: a probe is a
+   * channel too, and on sbt 1 a channel's disconnect runs a command that reloads changed
+   * build files (with `ReloadOnSourceChanges`) as a command of no channel, whose failed
+   * load then asks "(r)etry, (q)uit…" on the server's own stdin and hangs sbt.
+   */
   def session[A](f: Session => A): A =
-    val session = Session.open(this, ensureRunning(), log)
+    val direct =
+      activeSocket().flatMap { path =>
+        try Some(Session.open(this, path, log))
+        catch
+          case e: IOException =>
+            log(s"connecting to sbt failed (${e.getMessage}); checking that it runs")
+            None
+      }
+    val session = direct.getOrElse(Session.open(this, ensureRunning(), log))
     try f(session)
     finally session.close()
+
+  /** The socket `active.json` names, unchecked. */
+  private def activeSocket(): Option[Path] =
+    try
+      if !Files.isRegularFile(activeFile) then None
+      else
+        Files.readString(activeFile, StandardCharsets.UTF_8).fromJson[Json].toOption
+          .flatMap(_.asObject).flatMap(_.get("uri")).collect { case Json.Str(uri) => uri }
+          .flatMap(SbtServer.socketOf)
+    catch case NonFatal(_) => None
 
   private def boot(): Path =
     Files.createDirectories(runtimeDir)
@@ -120,6 +198,20 @@ final class SbtServer(val base: Path, start: StartMode, log: String => Unit):
       -1
 
 object SbtServer:
+
+  /** The build's sbt version, from `project/build.properties`. */
+  def sbtVersion(base: Path): Option[String] =
+    try
+      val props = java.util.Properties()
+      scala.util.Using.resource(Files.newBufferedReader(base.resolve("project").resolve("build.properties")))(props.load)
+      Option(props.getProperty("sbt.version")).map(_.trim).filter(_.nonEmpty)
+    catch case NonFatal(_) => None
+
+  /** Whether a command line (re)loads the build itself, so sbt doesn't check the build files first (as its `needCheck`). */
+  def reloads(commandLine: String): Boolean =
+    commandLine.split(';').map(_.trim.takeWhile(!_.isWhitespace)).exists(c =>
+      c == "reload" || c == "reboot" || c == "exit" || c == "shutdown" || c.startsWith("sbtReboot")
+    )
 
   val windows: Boolean = System.getProperty("os.name", "").toLowerCase.contains("win")
 
@@ -211,7 +303,23 @@ final class Session private (server: SbtServer, connection: SbtConnection, log: 
       val fields = params.asObject.map(_.fields.toMap).getOrElse(Map.empty)
       if fields.get("status").contains(Json.Str("Queued")) then
         onQueued(fields.get("message").collect { case Json.Str(m) => m }.getOrElse("queued"))
+    // sbt reads this channel's stdin (it flushes the command's output first, so a prompt is
+    // already in `output`). Nobody types into sbta's channel: a failed build load's
+    // "(r)etry, (q)uit, (l)ast, or (i)gnore?" is answered with (i)gnore, which keeps the
+    // build sbt had loaded before (retry would fail again, quit would stop the shared
+    // server), and the command is reported as failed. Other reads stay unanswered.
+    case "sbt/readSystemIn" =>
+      val prompt = synchronized(output.lastIndexOf(Session.LoadFailedPrompt) >= 0 && !loadFailed)
+      if prompt then
+        synchronized { loadFailed = true }
+        log("the build failed to load: answering sbt's prompt with (i)gnore")
+        try connection.notify("sbt/systemIn", Json.Num('i'.toByte))
+        catch case NonFatal(e) => log(s"answering sbt's prompt failed: ${e.getMessage}")
+      else log("sbt is waiting for input on stdin, which sbta doesn't provide (cancel the call to stop it)")
     case _ => ()
+
+  /** The command's build load failed, and sbt's retry/quit prompt was answered (see `sbt/readSystemIn`). */
+  private var loadFailed = false
 
   @volatile private var lastOutputAt = 0L
 
@@ -263,10 +371,28 @@ final class Session private (server: SbtServer, connection: SbtConnection, log: 
     truncated = false
     diagnostics.clear()
     clientJobs.clear()
+    loadFailed = false
   }
 
   /** Run a command line, as typed at the sbt shell; blocks until sbt has run it (cancelled on interrupt). */
   def exec(commandLine: String): ExecResult =
+    if !server.reloadFirst(commandLine) then run(commandLine)
+    else
+      val reload = run("reload")
+      if !reload.success then
+        reload.copy(commandLine = commandLine, error = reload.error.map(e => s"`$commandLine` didn't run: $e"))
+      else
+        val r = run(commandLine)
+        r.copy(output = reload.output + "\n" + r.output, elapsedMs = reload.elapsedMs + r.elapsedMs)
+
+  /** A BSP request is a command on sbt 1 too: reload changed build files from this channel first (see [[SbtServer.reloadFirst]]). */
+  private def reloadIfChanged(): Unit =
+    if server.reloadFirst("") then
+      val r = run("reload")
+      if !r.success then throw RpcError(-32603, r.error.getOrElse("the build failed to load"))
+
+  private def run(commandLine: String): ExecResult =
+    val fingerprint = server.buildFingerprint()
     reset()
     val started      = System.nanoTime()
     val (id, future) = connection.request("sbt/exec", Json.Obj("commandLine" -> Json.Str(commandLine)))
@@ -282,13 +408,31 @@ final class Session private (server: SbtServer, connection: SbtConnection, log: 
         case e: RpcError                     => Some(e.message)
     // Output written just before the response can arrive just after it (sbt batches console writes).
     awaitQuietOutput()
+    // A (re)load from this channel: sbt has loaded the build files as they were when it started.
+    if SbtServer.reloads(commandLine) then server.loaded(fingerprint)
     synchronized {
+      // The prompt was for a terminal; say what sbta answered instead.
+      val text = Text.stripAnsi(output.toString).replace(Session.LoadFailedPrompt, Session.LoadFailedAnswer)
+      val errors = Session.loadErrors(text)
+      // sbt 2 reloads changed build files for a command (`loadp`) without asking: a load
+      // that started but didn't get to setting the current project failed the command.
+      val failedLoad = loadFailed || (error.isDefined && Session.loadIncomplete(text))
+      val failure =
+        if failedLoad then
+          Some(
+            "the build failed to load; sbt kept the build it had loaded before. Fix the build files and `reload` again" +
+              (if errors.isEmpty then " (the error is in the log)" else s". The load error:\n$errors")
+          )
+        else error
+      // Remember a broken build (for the note on later results) until a load succeeds.
+      if failedLoad then server.loadFailed(errors)
+      else if failure.isEmpty && (SbtServer.reloads(commandLine) || text.contains(Session.LoadedMarker)) then server.loadSucceeded()
       ExecResult(
         commandLine,
-        error.isEmpty,
-        error,
+        failure.isEmpty,
+        failure,
         (System.nanoTime() - started) / 1_000_000,
-        Text.stripAnsi(output.toString),
+        text,
         truncated,
         diagnostics.values.flatten.toList,
         clientJobs.toList,
@@ -312,6 +456,7 @@ final class Session private (server: SbtServer, connection: SbtConnection, log: 
 
   /** A Build Server Protocol request on this channel (initialized on first use). */
   def bsp(method: String, params: Json): Json =
+    reloadIfChanged()
     bspInit()
     val (id, future) = connection.request(method, params)
     await(id, future)
@@ -322,6 +467,7 @@ final class Session private (server: SbtServer, connection: SbtConnection, log: 
    * session must then be closed: sbt drops a disconnected channel's queued requests.
    */
   def bspUnlessBusy(method: String, params: Json, maxWaitMillis: Long = Long.MaxValue): Option[Json] =
+    reloadIfChanged()
     bspInit()
     val queued = CompletableFuture[Json]()
     // "waiting for: shell" is sbt's idle prompt command, about to give way.
@@ -394,6 +540,31 @@ final class Session private (server: SbtServer, connection: SbtConnection, log: 
 
 object Session:
 
+
+  /** What sbt 1 and 2 ask (`BuiltinCommands.doLoadFailed`) when loading the build fails. */
+  val LoadFailedPrompt = "Project loading failed: (r)etry, (q)uit, (l)ast, or (i)gnore? (default: r)"
+  val LoadFailedAnswer = "Project loading failed (sbta answered sbt's prompt with (i)gnore: sbt keeps the build it had loaded)"
+  /** What sbt prints when it (re)loads the build. */
+  val LoadingMarker = "loading project definition from"
+  /** What sbt prints when a load has succeeded. */
+  val LoadedMarker = "set current project to"
+
+  /** The output's last load started and didn't finish. */
+  def loadIncomplete(output: String): Boolean =
+    val started = output.lastIndexOf(LoadingMarker)
+    started >= 0 && output.indexOf(LoadedMarker, started) < 0
+
+  /**
+   * The load error in a failed load's output: what sbt printed after starting to load,
+   * without its `[info]` lines and the prompt (at most 20 lines).
+   */
+  def loadErrors(output: String): String =
+    val lines = output.linesIterator.toList
+    val from  = lines.lastIndexWhere(_.contains(LoadingMarker))
+    lines.drop(from + 1)
+      .filterNot(l => l.startsWith("[info]") || l.contains(LoadFailedAnswer) || l.contains("Use 'last' for the full log") || l.trim.isEmpty)
+      .take(20).mkString("\n").take(3000)
+
   /** `p/Test/key` → `p/test:key`, `Test/key` → `test:key` (a capitalized middle part is a configuration). */
   def legacyKey(key: String): Option[String] =
     def config(c: String) = Option.when(c.headOption.exists(_.isUpper))(c.head.toLower.toString + c.tail)
@@ -406,8 +577,13 @@ object Session:
     val connection = SbtConnection.open(socket, (method, params) => if session != null then session.handle(method, params))
     session = Session(server, connection, log)
     val init = Json.Obj("initializationOptions" -> Json.Obj("skipAnalysis" -> Json.Bool(true)))
-    session.await0(connection.request("initialize", init))
-    session.await0(connection.request("sbt/attach", Json.Obj("interactive" -> Json.Bool(false))))
+    // Both at once, as sbt's own client does: with `sbt/attach` sent only after the
+    // `initialize` answer, sbt 1 asks a failed build load's "(r)etry, (q)uit…" on the
+    // server's own stdin instead of this channel's, and hangs.
+    val initialized = connection.request("initialize", init)
+    val attached    = connection.request("sbt/attach", Json.Obj("interactive" -> Json.Bool(false)))
+    session.await0(initialized)
+    session.await0(attached)
     session
 
   extension (s: Session)
