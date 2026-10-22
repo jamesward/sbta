@@ -35,6 +35,12 @@ final class SbtConnection private (
   private val ids     = AtomicLong(1)
   private val closed  = AtomicBoolean(false)
 
+  /** The one thread that writes to the channel (see [[write]]); it keeps messages whole and in order. */
+  private val writer = java.util.concurrent.Executors.newSingleThreadExecutor { r =>
+    val t = Thread(r, "sbta-sbt-writer")
+    t.setDaemon(true)
+    t
+  }
   private val reader = Thread(() => readLoop(), "sbta-sbt-reader")
   reader.setDaemon(true)
   reader.start()
@@ -59,13 +65,39 @@ final class SbtConnection private (
   def close(): Unit =
     if closed.compareAndSet(false, true) then
       try channel.close() catch case NonFatal(_) => ()
+      writer.shutdown()
       failPending(IOException("the connection to sbt was closed"))
 
   private def write(message: Json): Unit =
     val body = message.toJson.getBytes(StandardCharsets.UTF_8)
-    output.synchronized {
-      output.write(s"Content-Length: ${body.length}\r\n\r\n".getBytes(StandardCharsets.US_ASCII))
-      output.write(body)
+    // On the writer thread, never the caller's: a SocketChannel is an InterruptibleChannel,
+    // so a write from a thread being interrupted (a cancelled call: ZIO's
+    // attemptBlockingInterrupt interrupts until the call returns) would close the
+    // connection, and with it the `sbt/cancelRequest` meant to cancel the command.
+    val done =
+      try
+        CompletableFuture.runAsync(
+          () =>
+            output.write(s"Content-Length: ${body.length}\r\n\r\n".getBytes(StandardCharsets.US_ASCII))
+            output.write(body),
+          writer,
+        )
+      catch case _: java.util.concurrent.RejectedExecutionException => throw IOException("the connection to sbt was closed")
+    // Wait for the write even if interrupted (it's quick, and the caller needs to know it was
+    // sent), then keep the interrupt for the caller.
+    var interrupted = false
+    var result      = Option.empty[Throwable]
+    var waiting     = true
+    while waiting do
+      try { done.get(); waiting = false }
+      catch
+        case _: InterruptedException                       => interrupted = true
+        case e: java.util.concurrent.ExecutionException    => result = Some(e.getCause); waiting = false
+        case e: java.util.concurrent.CancellationException => result = Some(IOException("the connection to sbt was closed")); waiting = false
+    if interrupted then Thread.currentThread.interrupt()
+    result.foreach {
+      case e: IOException => throw e
+      case e              => throw IOException(s"writing to sbt failed: $e", e)
     }
 
   private def readLoop(): Unit =
@@ -78,6 +110,7 @@ final class SbtConnection private (
         case error: Throwable => IOException(s"lost the connection to sbt: $error")
     closed.set(true)
     try channel.close() catch case NonFatal(_) => ()
+    writer.shutdown()
     failPending(reason)
 
   private def failPending(error: Throwable): Unit =

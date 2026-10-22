@@ -175,6 +175,25 @@ object SbtaSpec extends ZIOSpecDefault:
         yield assertTrue(seen.contains("sbt/cancelRequest"))
       }
     } @@ TestAspect.withLiveClock,
+    test("repeated interrupts (as ZIO's attemptBlockingInterrupt sends) don't close the connection before the cancel is sent") {
+      withBuild { dir =>
+        val (socket, seen) = fakeSbt(dir)
+        val s = session(dir, socket)
+        try
+          val caller = Thread(() => { try s.exec("slow") catch case _: Exception => (); () })
+          caller.start()
+          val deadline = java.lang.System.nanoTime() + 10_000_000_000L
+          while !seen.contains("sbt/exec") && java.lang.System.nanoTime() < deadline do Thread.sleep(5)
+          // Keep interrupting until the call returns, like ZIO's interruptThread.
+          while caller.isAlive && java.lang.System.nanoTime() < deadline do
+            caller.interrupt()
+            Thread.sleep(0, 100_000)
+          caller.join(1000)
+          while !seen.contains("sbt/cancelRequest") && java.lang.System.nanoTime() < deadline do Thread.sleep(5)
+          assertTrue(seen.contains("sbt/cancelRequest"))
+        finally s.close()
+      }
+    },
     test("JUnit XML: failures keep their line breaks, without sbt's fork wrappers or colour codes") {
       withBuild { dir =>
         val file = dir.resolve("TEST-demo.FailSpec.xml")
