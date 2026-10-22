@@ -40,7 +40,7 @@ object SbtaSpec extends ZIOSpecDefault:
   private def str(m: Json, name: String): String         = field(m, name).collect { case Json.Str(s) => s }.getOrElse("")
 
   /** Serves one connection: what a real sbt does for initialize, attach, exec and cancel. Returns the socket and the requests seen. */
-  private def fakeSbt(dir: Path): (Path, java.util.concurrent.ConcurrentLinkedQueue[String]) =
+  private def fakeSbt(dir: Path, dropFirstAttach: Boolean = false): (Path, java.util.concurrent.ConcurrentLinkedQueue[String]) =
     val socket = dir.resolve("sock")
     val seen   = java.util.concurrent.ConcurrentLinkedQueue[String]()
     val server = ServerSocketChannel.open(StandardProtocolFamily.UNIX)
@@ -50,6 +50,7 @@ object SbtaSpec extends ZIOSpecDefault:
       val in      = BufferedInputStream(Channels.newInputStream(channel))
       val out     = Channels.newOutputStream(channel)
       var running: Option[String] = None
+      var dropAttach              = dropFirstAttach
       try
         while true do
           val m      = readMessage(in)
@@ -58,6 +59,9 @@ object SbtaSpec extends ZIOSpecDefault:
           if method.nonEmpty then seen.add(method)
           method match
             case "initialize" => write(out, s"""{"jsonrpc":"2.0","id":$id,"result":{"capabilities":{}}}""")
+            case "sbt/attach" if dropAttach =>
+              // As sbt 1 when the attach is read before the new channel is registered: no answer.
+              dropAttach = false
             case "sbt/attach" =>
               // sbt asks the attached client about its terminal before answering.
               write(out, """{"jsonrpc":"2.0","id":"q1","method":"sbt/terminalPropertiesQuery","params":""}""")
@@ -122,6 +126,16 @@ object SbtaSpec extends ZIOSpecDefault:
             seen.contains("answered:false"),
             seen.contains("sbt/attach"),
           )
+        finally s.close()
+      }
+    },
+    test("an sbt/attach that sbt drops (read before it registered the channel) is sent again") {
+      withBuild { dir =>
+        val (socket, seen) = fakeSbt(dir, dropFirstAttach = true)
+        val s = session(dir, socket)
+        try
+          val r = s.exec("compile")
+          assertTrue(r.success, seen.toArray.count(_ == "sbt/attach") == 2, seen.contains("answered:false"))
         finally s.close()
       }
     },

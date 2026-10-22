@@ -581,9 +581,23 @@ object Session:
     // `initialize` answer, sbt 1 asks a failed build load's "(r)etry, (q)uit…" on the
     // server's own stdin instead of this channel's, and hangs.
     val initialized = connection.request("initialize", init)
-    val attached    = connection.request("sbt/attach", Json.Obj("interactive" -> Json.Bool(false)))
+    val attach      = Json.Obj("interactive" -> Json.Bool(false))
+    var attached    = connection.request("sbt/attach", attach)
     session.await0(initialized)
-    session.await0(attached)
+    // sbt (1.12 at least) can drop an `sbt/attach` that arrives before it has registered
+    // the new channel: `NetworkChannel` starts reading in its constructor, and
+    // `channelForName` finds no channel yet, so nothing answers. Ask again, until one is
+    // answered (asking twice only replaces the channel's terminal).
+    val deadline = System.nanoTime() + 30_000_000_000L
+    var answered = Option.empty[Json]
+    while answered.isEmpty do
+      try answered = Some(attached._2.get(1, TimeUnit.SECONDS))
+      catch
+        case _: TimeoutException =>
+          if System.nanoTime() > deadline then throw IOException("sbt did not answer the connection handshake within 30 s")
+          log(s"sbt didn't answer sbt/attach ${attached._1} within 1 s; asking again")
+          attached = connection.request("sbt/attach", attach)
+        case e: java.util.concurrent.ExecutionException => throw e.getCause
     session
 
   extension (s: Session)
