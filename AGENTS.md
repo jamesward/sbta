@@ -24,7 +24,7 @@ works.
 - Use the MCP server `sbta` (this build's own `./sbta --mcp`; Kiro: `.kiro/settings/mcp.json`, Claude Code: `.mcp.json`, approved in `.claude/settings.json`) for sbt work: `compile`, `test`, `check`, the symbol tools and `sbt-task`. If it's unavailable (not installed yet), say so and use `./sbta` directly.
 
 - `./sbta testFull`: everything CI runs on Linux. The launcher specs (`LauncherSpec`)
-  start sbt 1.12.11 and 2.0.10 builds and take a few minutes; `./sbta "testOnly *SbtaSpec"`
+  start sbt 1.12.11 and 2.0.11 builds and take a few minutes; `./sbta "testOnly *SbtaSpec"`
   is the fast unit suite.
 - The shrunk jar (`sbtaShrink`) is what's tested and published. A new reflective call
   that ProGuard can't follow fails `ReflectionSpec`: keep its targets in `proguard.pro`

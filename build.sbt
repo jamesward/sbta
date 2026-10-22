@@ -10,12 +10,12 @@ ThisBuild / licenses     := List("Apache-2.0" -> uri("https://www.apache.org/lic
 ThisBuild / developers   := List(Developer("jamesward", "James Ward", "james@jamesward.com", uri("https://jamesward.com")))
 ThisBuild / versionScheme := Some("semver-spec")
 
-val zioVersion = "2.1.26"
+val zioVersion = "2.1.27"
 
 // The sbt launcher sbta runs in-process for everything but `--mcp`, embedded as a jar
 // (it bundles its own Scala 2.12 classes, so it can't be merged into sbta's). The
 // runner scripts in src/scripts are this release's (see src/scripts/update.sh).
-val SbtLaunchVersion = "2.0.10"
+val SbtLaunchVersion = "2.0.11"
 lazy val SbtLaunch    = config("sbt-launch").hide
 lazy val Proguard     = config("proguard").hide
 lazy val sbtaShrink   = taskKey[File]("The sbta jar: the assembly, shrunk by ProGuard (proguard.pro).")
@@ -113,7 +113,7 @@ lazy val sbta = (project in file("."))
       "org.ow2.asm"    % "asm"          % "9.11"     % Test,
       ("org.scala-sbt" % "sbt-launch"   % SbtLaunchVersion % SbtLaunch).intransitive(),
       "com.guardsquare" % "proguard-base" % "7.10.0" % Proguard,
-      "com.jamesward" % "skills" % "0.0.16" % Skills,
+      "com.jamesward" % "skills" % "0.0.17" % Skills,
     ),
     ivyConfigurations ++= Seq(SbtLaunch, Proguard),
     crossPaths := false,

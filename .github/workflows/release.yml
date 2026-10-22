@@ -33,7 +33,7 @@ jobs:
 
       - name: GitHub release with the sbta jar and scripts
         if: github.ref_type == 'tag'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: target/out/jvm/u/sbta/sbta-dist/*
           fail_on_unmatched_files: true
