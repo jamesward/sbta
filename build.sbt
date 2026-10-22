@@ -15,7 +15,7 @@ val zioVersion = "2.1.26"
 // The sbt launcher sbta runs in-process for everything but `--mcp`, embedded as a jar
 // (it bundles its own Scala 2.12 classes, so it can't be merged into sbta's). The
 // runner scripts in src/scripts are this release's (see src/scripts/update.sh).
-val SbtLaunchVersion = "2.0.10"
+val SbtLaunchVersion = "2.0.11"
 lazy val SbtLaunch    = config("sbt-launch").hide
 lazy val Proguard     = config("proguard").hide
 lazy val sbtaShrink   = taskKey[File]("The sbta jar: the assembly, shrunk by ProGuard (proguard.pro).")
@@ -113,7 +113,7 @@ lazy val sbta = (project in file("."))
       "org.ow2.asm"    % "asm"          % "9.11"     % Test,
       ("org.scala-sbt" % "sbt-launch"   % SbtLaunchVersion % SbtLaunch).intransitive(),
       "com.guardsquare" % "proguard-base" % "7.10.0" % Proguard,
-      "com.jamesward" % "skills" % "0.0.16" % Skills,
+      "com.jamesward" % "skills" % "0.0.17" % Skills,
     ),
     ivyConfigurations ++= Seq(SbtLaunch, Proguard),
     crossPaths := false,

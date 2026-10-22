@@ -435,7 +435,7 @@ object LauncherSpec extends ZIOSpecDefault:
     if Files.exists(dir) then
       scala.util.Using.resource(Files.walk(dir))(_.sorted(java.util.Comparator.reverseOrder()).forEach(p => Files.deleteIfExists(p)))
 
-  def spec = suite("sbta as a launcher")(suiteFor("1.12.11"), suiteFor("2.0.10")) @@ TestAspect.sequential @@
+  def spec = suite("sbta as a launcher")(suiteFor("1.12.11"), suiteFor("2.0.11")) @@ TestAspect.sequential @@
     TestAspect.withLiveClock @@ TestAspect.afterAll(ZIO.succeed(deleteRecursively(repo)))
 
   /** A newline-delimited JSON-RPC subprocess (an MCP stdio server). */

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Replace sbt's runner scripts (the base of sbta and sbta.bat) with those of an sbt
-# release, from its distribution zip: ./update.sh 2.0.10
+# release, from its distribution zip: ./update.sh 2.0.11
 # Then set SbtLaunchVersion in build.sbt to the same version and run `sbta/sbtaScripts`,
 # which fails if one of sbta's edits no longer applies.
 set -euo pipefail

@@ -41,7 +41,7 @@ these engines started.
   looks for its launcher there). So `java -jar sbta.jar <args>` is
   `java -jar sbt-launch.jar <args>`.
 - **Scripts.** `src/scripts/sbt` and `sbt.bat` are the runner scripts of the
-  sbt release the embedded launcher comes from (`SbtLaunchVersion`, now 2.0.10),
+  sbt release the embedded launcher comes from (`SbtLaunchVersion`, now 2.0.11),
   verbatim from its distribution zip. `project/SbtaScripts.scala` (`sbtaScripts`)
   checks they're that release, then applies the few edits (jar URL and cache path,
   sbta's main class in the .bat, `--mcp` without sbtn, the JVM client when no sbtn is
@@ -84,7 +84,7 @@ these engines started.
   The remaining risk is reflection driven by data (e.g. a class name read from a
   file), which bytecode can't show and only the end-to-end tests exercise.
 - **Tests.** `SbtaSpec` uses a fake sbt server. `LauncherSpec` runs the assembled jar
-  and generated script against sbt 1.12.11 and 2.0.10 builds (commands and exit codes,
+  and generated script against sbt 1.12.11 and 2.0.11 builds (commands and exit codes,
   the shell, the script's download, `--mcp` with aggregation): a few minutes.
   Processes started from an sbt-forked JVM inherit `SBT_TERMINAL_PROPS`, which makes a
   child sbt ignore stdin; the spec and `SbtServer` remove it.
