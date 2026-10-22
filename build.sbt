@@ -10,7 +10,7 @@ ThisBuild / licenses     := List("Apache-2.0" -> uri("https://www.apache.org/lic
 ThisBuild / developers   := List(Developer("jamesward", "James Ward", "james@jamesward.com", uri("https://jamesward.com")))
 ThisBuild / versionScheme := Some("semver-spec")
 
-val zioVersion = "2.1.27"
+val zioVersion = "2.1.26"
 
 // The sbt launcher sbta runs in-process for everything but `--mcp`, embedded as a jar
 // (it bundles its own Scala 2.12 classes, so it can't be merged into sbta's). The
