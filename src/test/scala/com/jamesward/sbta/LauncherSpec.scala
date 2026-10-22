@@ -431,9 +431,36 @@ object LauncherSpec extends ZIOSpecDefault:
   private def path(json: Json, fields: String*): Option[Json] =
     fields.foldLeft(Option(json))((j, f) => j.flatMap(_.asObject).flatMap(_.get(f)))
 
+  /**
+   * Delete `dir`, tolerating files that an exiting sbt removes or writes meanwhile
+   * (`--client shutdown` returns before sbt's JVM has finished, e.g. with
+   * `project/target/active.json`): a vanished file is skipped, and a directory that
+   * gained a file is retried.
+   */
   private def deleteRecursively(dir: Path): Unit =
-    if Files.exists(dir) then
-      scala.util.Using.resource(Files.walk(dir))(_.sorted(java.util.Comparator.reverseOrder()).forEach(p => Files.deleteIfExists(p)))
+    import java.nio.file.{ DirectoryNotEmptyException, FileVisitResult, NoSuchFileException, SimpleFileVisitor }
+    import java.nio.file.attribute.BasicFileAttributes
+    def once(): Unit =
+      Files.walkFileTree(
+        dir,
+        new SimpleFileVisitor[Path]:
+          override def visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult =
+            Files.deleteIfExists(file); FileVisitResult.CONTINUE
+          override def visitFileFailed(file: Path, e: java.io.IOException): FileVisitResult =
+            if e.isInstanceOf[NoSuchFileException] then FileVisitResult.CONTINUE else throw e
+          override def postVisitDirectory(d: Path, e: java.io.IOException): FileVisitResult =
+            if e != null && !e.isInstanceOf[NoSuchFileException] then throw e
+            Files.deleteIfExists(d); FileVisitResult.CONTINUE,
+      )
+    var attempt = 1
+    while Files.exists(dir) do
+      try once()
+      catch
+        case _: NoSuchFileException => ()
+        case e: DirectoryNotEmptyException =>
+          if attempt >= 20 then throw e
+          attempt += 1
+          Thread.sleep(250)
 
   def spec = suite("sbta as a launcher")(suiteFor("1.12.11"), suiteFor("2.0.11")) @@ TestAspect.sequential @@
     TestAspect.withLiveClock @@ TestAspect.afterAll(ZIO.succeed(deleteRecursively(repo)))
