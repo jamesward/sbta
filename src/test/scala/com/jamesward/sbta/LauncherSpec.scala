@@ -196,6 +196,7 @@ object LauncherSpec extends ZIOSpecDefault:
       failedReloadThroughSbtTask(sbtVersion),
       rebootThroughSbtTask(sbtVersion),
       failedChainThroughSbtTask(sbtVersion),
+      revertedSbtVersion(sbtVersion),
       updateThroughScript(sbtVersion),
     ) @@ TestAspect.sequential @@ TestAspect.afterAll(ZIO.succeed {
       script(dir, List("--client", "shutdown"), timeoutSeconds = 60)
@@ -383,6 +384,53 @@ object LauncherSpec extends ZIOSpecDefault:
           text(recovered).contains("[ok] reload"),
           text(after).contains("leaf"),
           !text(after).contains("The build files don't load"),
+        )
+      }
+    } @@ TestAspect.ifProp("os.name")(!_.toLowerCase.contains("win"))
+
+  /**
+   * sbt can't start with an `sbt.version` that can't be downloaded; once
+   * `project/build.properties` is reverted, the next call starts sbt with the version
+   * it names now, at once (not the failure remembered from before the revert).
+   */
+  private def revertedSbtVersion(sbtVersion: String) =
+    test("a start that failed on a bad sbt.version is retried with the reverted one on the next call, and says where the version came from") {
+      val dir   = build(sbtVersion)
+      val props = dir.resolve("project/build.properties")
+      Files.writeString(props, "sbt.version=1.99.99\n")
+      def call(mcp: McpProcess, id: Int, timeoutSeconds: Long) =
+        mcp.send(s"""{"jsonrpc":"2.0","id":$id,"method":"tools/call","params":{"name":"sbt-task","arguments":{"command":"leaf/sbtVersion"}}}""")
+        mcp.response(id, timeoutSeconds)
+      ZIO.attemptBlocking {
+        val mcp = McpProcess.start(
+          dir,
+          // Lazy: sbt starts on the first call, with the bad version.
+          List(Path.of(java.lang.System.getProperty("java.home"), "bin", "java").toString, "-jar", jar.toString, "--mcp", "--docs-url=none", "--start=lazy"),
+          Map("SBTA_RELEASES_URL" -> repo.toUri.toString),
+        )
+        try
+          mcp.send("""{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"spec","version":"1"}}}""")
+          mcp.send("""{"jsonrpc":"2.0","method":"notifications/initialized"}""")
+          mcp.response(1, 60)
+          val failed = call(mcp, 2, 180)
+          Files.writeString(props, s"sbt.version=$sbtVersion\n")
+          val started = java.lang.System.nanoTime()
+          val after   = call(mcp, 3, 300)
+          (failed, after, (java.lang.System.nanoTime() - started) / 1_000_000_000L)
+        finally
+          mcp.close()
+          stopSbt(dir)
+          deleteRecursively(dir)
+      }.map { case (failed, after, seconds) =>
+        def text(r: Option[Json]) = r.map(_.toJson).getOrElse("")
+        assertTrue(
+          text(failed).contains("sbt did not start"),
+          text(failed).contains("sbt.version=1.99.99 from project/build.properties"),
+          text(failed).contains("1.99.99"),
+          text(after).contains("[ok] leaf/sbtVersion"),
+          text(after).contains(sbtVersion),
+          !text(after).contains("1.99.99"),
+          seconds < 120,
         )
       }
     } @@ TestAspect.ifProp("os.name")(!_.toLowerCase.contains("win"))

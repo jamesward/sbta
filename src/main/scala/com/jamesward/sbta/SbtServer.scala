@@ -184,7 +184,13 @@ final class SbtServer(val base: Path, start: StartMode, log: String => Unit):
 
   private def boot(): Path =
     Files.createDirectories(runtimeDir)
-    log(s"starting sbt in $base (output: $bootLog)")
+    val version = SbtServer.sbtVersion(base)
+    val from    = version.fold("no sbt.version in project/build.properties")(v => s"sbt.version=$v from project/build.properties")
+    log(s"starting sbt in $base ($from; output: $bootLog)")
+    // Each start's output after its own header, so a failure shows this start's lines only.
+    try Files.writeString(bootLog, s"${SbtServer.BootHeader} ${java.time.Instant.now()} ($from)\n", StandardCharsets.UTF_8,
+        java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND)
+    catch case NonFatal(_) => ()
     val started = System.nanoTime()
     var code    = runSbt("--client")
     if code != 0 && socket().isEmpty then
@@ -204,7 +210,8 @@ final class SbtServer(val base: Path, start: StartMode, log: String => Unit):
         path
       case None =>
         val failure =
-          s"sbt did not start in $base (exit code $code). Last lines of $bootLog:\n${SbtServer.tail(bootLog, 25)}"
+          s"sbt did not start in $base ($from, exit code $code). sbta tries again on the next call once the build files " +
+            s"(project/build.properties included) change, or after 30 s. Last lines of $bootLog:\n${SbtServer.tailSince(bootLog, SbtServer.BootHeader, 25)}"
         lastFailure = Some((System.currentTimeMillis(), buildFingerprint(), failure))
         log(failure)
         throw IOException(failure)
@@ -278,11 +285,18 @@ object SbtServer:
       finally channel.close()
     catch case NonFatal(_) => false
 
-  def tail(file: Path, lines: Int): String =
+  /** Starts each sbt start's output in the boot log. */
+  val BootHeader = "--- sbta: starting sbt"
+
+  /** The last `lines` lines of `file` after its last line starting with `header` (or of all of it). */
+  def tailSince(file: Path, header: String, lines: Int): String =
     try
-      val all = Files.readAllLines(file, StandardCharsets.UTF_8)
-      String.join("\n", all.subList(math.max(0, all.size - lines), all.size))
+      val all  = Files.readAllLines(file, StandardCharsets.UTF_8).asScala.toVector
+      val from = all.lastIndexWhere(_.startsWith(header)) + 1
+      val mine = all.drop(from)
+      if mine.isEmpty then "(no output)" else mine.takeRight(lines).mkString("\n")
     catch case NonFatal(_) => "(no output)"
+
 
 /** A compiler diagnostic from BSP `build/publishDiagnostics`. */
 final case class Diagnostic(severity: String, file: Option[String], line: Option[Int], column: Option[Int], message: String)
