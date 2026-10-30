@@ -412,11 +412,26 @@ object SbtaSpec extends ZIOSpecDefault:
         Updates.latestRelease("not json").isEmpty,
       )
     },
+    test("the newest release comes from the releases API, or else from the latest release's script (where the API is blocked)") {
+      val api    = releasesJson(("v0.9.0", false, false), ("v0.10.0", false, false))
+      val script = releaseScript("0.11.0")
+      def get(answers: Map[String, String])(url: String) = answers.getOrElse(url, throw java.io.IOException("Server returned HTTP response code: 403"))
+      val both     = Updates.latest(get(Map(Updates.ReleasesApi -> api, Updates.LatestScript -> script)))
+      val blocked  = Updates.latest(get(Map(Updates.LatestScript -> script)))
+      val neither  = Updates.latest(get(Map.empty))
+      val notAPin  = Updates.latest(get(Map(Updates.LatestScript -> releaseScript("0.12.0-RC1"))))
+      assertTrue(
+        both == Right(v("0.10.0")), // the API, by semver, when it answers
+        blocked == Right(v("0.11.0")),
+        neither.left.exists(e => e.contains("api.github.com") && e.contains("releases/latest/download/sbta") && e.contains("403")),
+        notAPin.isLeft,
+      )
+    },
     test("the check runs at most once a day, and a failed one keeps what the last found") {
       withBuild { dir =>
         val file  = dir.resolve("latest.json")
         var calls = 0
-        def fetch(json: String) = () => { calls += 1; json }
+        def fetch(json: String) = () => { calls += 1; Updates.latestRelease(json).toRight("none") }
         val day   = Updates.CheckInterval
         val first = Updates.refresh(file, 1000, fetch(releasesJson(("v0.1.0", false, false))))
         val same  = Updates.refresh(file, 1000 + day - 1, fetch(releasesJson(("v0.2.0", false, false))))
@@ -453,8 +468,8 @@ object SbtaSpec extends ZIOSpecDefault:
         val repo = releases(dir.resolve("repo"), "0.3.0")
         Files.writeString(dir.resolve("sbta"), releaseScript("0.2.0"))
         Files.writeString(dir.resolve("sbta.bat"), "old")
-        val result = Updates.update(dir, None, repo, () => Some(v("0.3.0")), deferBat = false)
-        val again  = Updates.update(dir, Some("0.3.0"), repo, () => None, deferBat = false)
+        val result = Updates.update(dir, None, repo, () => Right(v("0.3.0")), deferBat = false)
+        val again  = Updates.update(dir, Some("0.3.0"), repo, () => Left("offline"), deferBat = false)
         val pinned = Updates.pinnedVersion(dir)
         val bat    = Files.readString(dir.resolve("sbta.bat"))
         val executable = SbtServer.windows || Files.isExecutable(dir.resolve("sbta"))
@@ -471,11 +486,11 @@ object SbtaSpec extends ZIOSpecDefault:
       withBuild { dir =>
         val repo = releases(dir.resolve("repo"), "0.3.0", corruptBat = true)
         Files.writeString(dir.resolve("sbta"), releaseScript("0.2.0"))
-        val tampered = Updates.update(dir, Some("0.3.0"), repo, () => None, deferBat = false)
+        val tampered = Updates.update(dir, Some("0.3.0"), repo, () => Left("offline"), deferBat = false)
         val pinned   = Updates.pinnedVersion(dir)
-        val missing  = Updates.update(dir, Some("9.9.9"), repo, () => None, deferBat = false)
+        val missing  = Updates.update(dir, Some("9.9.9"), repo, () => Left("offline"), deferBat = false)
         Files.writeString(dir.resolve("sbta"), "#!/usr/bin/env bash\ndeclare sbta_local_jar=\"x.jar\"\n")
-        val local = Updates.update(dir, Some("0.3.0"), repo, () => None, deferBat = false)
+        val local = Updates.update(dir, Some("0.3.0"), repo, () => Left("offline"), deferBat = false)
         assertTrue(
           tampered.left.exists(_.contains("sbta.bat of 0.3.0 doesn't match its SHA256SUMS")),
           pinned.contains("0.2.0"),
@@ -489,7 +504,7 @@ object SbtaSpec extends ZIOSpecDefault:
         val repo = releases(dir.resolve("repo"), "0.3.0")
         Files.writeString(dir.resolve("sbta"), releaseScript("0.2.0"))
         Files.writeString(dir.resolve("sbta.bat"), "old")
-        val result = Updates.update(dir, Some("0.3.0"), repo, () => None, deferBat = true)
+        val result = Updates.update(dir, Some("0.3.0"), repo, () => Left("offline"), deferBat = true)
         val bat    = Files.readString(dir.resolve("sbta.bat"))
         val next   = Files.readString(dir.resolve("sbta.bat.new"))
         assertTrue(result.isRight, bat == "old", next.contains("0.3.0"))

@@ -52,7 +52,8 @@ The scripts pin their sbta version, so updating is a change to commit:
 `./sbta --update` replaces `sbta` and `sbta.bat` with the newest release's (or
 `./sbta --update <version>`), checked against the release's `SHA256SUMS`.
 
-sbta checks GitHub for the newest release (semver, releases only) at most once a day,
+sbta checks GitHub for the newest release (semver, releases only; where the GitHub API
+is blocked, the version the latest release's `sbta` script pins) at most once a day,
 in the background, and says when there's a newer one: on stderr when you run `./sbta`,
 and over MCP in the server's instructions and as a note on every tool result, for the
 agent to pass on (it can update with the `update-sbta` tool). `--no-update-notice`
@@ -113,7 +114,8 @@ there). Everything else works on Windows with `sbta.bat`.
 sbta connects only to sbt's own server socket, which only your user can open. The
 tools run arbitrary build code (`sbt-task`, `run`, `show`). The docs proxy makes
 outbound requests to javadocs.dev; `--docs-url=none` turns it off. The daily update
-check calls the GitHub API (`api.github.com`); `SBTA_NO_UPDATE_CHECK=1` turns it off.
+check calls the GitHub API (`api.github.com`), or else downloads the latest release's
+`sbta` script from `github.com`; `SBTA_NO_UPDATE_CHECK=1` turns it off.
 
 ## Development
 

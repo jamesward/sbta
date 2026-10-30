@@ -84,8 +84,30 @@ object Updates:
 
   val CheckInterval: Long = 24L * 60 * 60 * 1000
 
-  val ReleasesApi = "https://api.github.com/repos/jamesward/sbta/releases?per_page=100"
-  val Releases    = "https://github.com/jamesward/sbta/releases/download"
+  val ReleasesApi  = "https://api.github.com/repos/jamesward/sbta/releases?per_page=100"
+  val Releases     = "https://github.com/jamesward/sbta/releases/download"
+  /** The `sbta` script of the release GitHub marks latest (a redirect to the asset, not the API). */
+  val LatestScript = "https://github.com/jamesward/sbta/releases/latest/download/sbta"
+
+  private val PinPattern = """(?m)^declare sbta_version="([^"]+)"""".r
+
+  /** The release version a release `sbta` script pins. */
+  def scriptVersion(script: String): Option[Version] =
+    PinPattern.findFirstMatchIn(script).flatMap(m => Version.parse(m.group(1))).filter(_.isRelease)
+
+  /**
+   * The newest release: by semver from the releases API, or else the version that
+   * GitHub's latest release's `sbta` script pins. Some sandboxes (e.g. cloud agent
+   * sessions) block api.github.com and `/releases/latest` but let release downloads
+   * through. On failure, what each source said.
+   */
+  def latest(get: String => String = fetch): Either[String, Version] =
+    def attempt(url: String)(parse: String => Option[Version]): Either[String, Version] =
+      try parse(get(url)).toRight(s"$url: no release found")
+      catch case NonFatal(e) => Left(s"$url: ${Option(e.getMessage).getOrElse(e.toString)}")
+    attempt(ReleasesApi)(latestRelease).left.flatMap { api =>
+      attempt(LatestScript)(scriptVersion).left.map(script => s"$api; $script")
+    }
 
   def cacheFile: Path =
     Path.of(System.getProperty("user.home")).resolve(".cache").resolve("sbt").resolve("boot").resolve("sbta").resolve("latest.json")
@@ -113,13 +135,13 @@ object Updates:
 
   /**
    * Check for the newest release unless the last check (successful or not) is less
-   * than a day old, and record the result. `fetch` returns the releases API's JSON.
+   * than a day old, and record the result. `find` looks it up (see [[latest]]).
    */
-  def refresh(file: Path, now: Long, fetch: () => String): Option[Checked] =
+  def refresh(file: Path, now: Long, find: () => Either[String, Version]): Option[Checked] =
     val previous = read(file)
     if previous.exists(p => now - p.checkedAt < CheckInterval && now >= p.checkedAt) then previous
     else
-      val found   = try latestRelease(fetch()) catch case NonFatal(_) => None
+      val found   = try find().toOption catch case NonFatal(_) => None
       // A failed check keeps what the last one found, and waits a day too.
       val checked = Checked(now, found.map(_.toString).orElse(previous.flatMap(_.latest)))
       write(file, checked)
@@ -128,7 +150,7 @@ object Updates:
   /** [[refresh]] of `file` against GitHub, in a daemon thread; `done` gets the result. Nothing when the check is off. */
   def refreshInBackground(file: Path = cacheFile)(done: Option[Checked] => Unit = _ => ()): Unit =
     if !checkDisabled() then
-      val thread = Thread(() => done(refresh(file, System.currentTimeMillis(), () => fetch(ReleasesApi))), "sbta-update-check")
+      val thread = Thread(() => done(refresh(file, System.currentTimeMillis(), () => latest())), "sbta-update-check")
       thread.setDaemon(true)
       thread.start()
 
@@ -151,7 +173,6 @@ object Updates:
 
   /** The version a release `sbta` script pins (`declare sbta_version="…"`), if `dir` has one. */
   def pinnedVersion(dir: Path): Option[String] =
-    val PinPattern = """(?m)^declare sbta_version="([^"]+)"""".r
     try
       val script = dir.resolve("sbta")
       if Files.isRegularFile(script) then PinPattern.findFirstMatchIn(Files.readString(script)).map(_.group(1)) else None
@@ -170,7 +191,7 @@ object Updates:
       dir: Path,
       version: Option[String],
       releases: String,
-      latest: () => Option[Version],
+      latest: () => Either[String, Version],
       deferBat: Boolean,
       get: String => Array[Byte] = fetchBytes,
   ): Either[String, List[String]] =
@@ -180,7 +201,8 @@ object Updates:
       case Some(pinned) =>
         val target = version match
           case Some(v) => Version.parse(v).toRight(s"not a version: $v")
-          case None    => latest().toRight("couldn't find the newest sbta release (try --update <version>)")
+          case None    =>
+            latest().left.map(why => s"couldn't find the newest sbta release ($why); try --update <version>")
         target.flatMap { v =>
           if Version.parse(pinned).contains(v) then Right(List(s"sbta and sbta.bat are already $v"))
           else
@@ -270,7 +292,7 @@ object Updates:
       dir,
       version,
       releasesBase(),
-      () => try latestRelease(fetch(ReleasesApi)) catch case NonFatal(_) => None,
+      () => latest(),
       deferBat = SbtServer.windows && fromScript.isDefined,
     )
     result match
