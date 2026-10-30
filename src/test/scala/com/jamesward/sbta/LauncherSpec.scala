@@ -488,7 +488,7 @@ object LauncherSpec extends ZIOSpecDefault:
     test("sbt-task `reboot` after an sbt.version change switches versions and runs the rest of the line; a failed reboot reports why") {
       val dir   = build(sbtVersion)
       val props = dir.resolve("project/build.properties")
-      // A neighbouring release: 1.12.11 → 1.12.10, 2.0.11 → 2.0.10.
+      // A neighbouring release: 1.12.15 → 1.12.14, 2.0.12 → 2.0.11.
       val other = sbtVersion.split('.') match
         case Array(a, b, c) => s"$a.$b.${c.toInt - 1}"
         case _              => sbtVersion
@@ -616,7 +616,7 @@ object LauncherSpec extends ZIOSpecDefault:
           attempt += 1
           Thread.sleep(250)
 
-  def spec = suite("sbta as a launcher")(suiteFor("1.12.11"), suiteFor("2.0.11")) @@ TestAspect.sequential @@
+  def spec = suite("sbta as a launcher")(suiteFor("1.12.15"), suiteFor("2.0.12")) @@ TestAspect.sequential @@
     TestAspect.withLiveClock @@ TestAspect.afterAll(ZIO.succeed(deleteRecursively(repo)))
 
   /** A newline-delimited JSON-RPC subprocess (an MCP stdio server). */

@@ -15,7 +15,7 @@ val zioVersion = "2.1.27"
 // The sbt launcher sbta runs in-process for everything but `--mcp`, embedded as a jar
 // (it bundles its own Scala 2.12 classes, so it can't be merged into sbta's). The
 // runner scripts in src/scripts are this release's (see src/scripts/update.sh).
-val SbtLaunchVersion = "2.0.11"
+val SbtLaunchVersion = "2.0.12"
 lazy val SbtLaunch    = config("sbt-launch").hide
 lazy val Proguard     = config("proguard").hide
 lazy val sbtaShrink   = taskKey[File]("The sbta jar: the assembly, shrunk by ProGuard (proguard.pro).")
@@ -98,7 +98,7 @@ lazy val sbta = (project in file("."))
     name := "sbta",
     description := "sbta: an sbt launcher whose --mcp serves MCP over stdio as a client of the build's sbt server",
     scalaVersion := "3.10.0",
-    scalacOptions ++= Seq("-release", "17", "-Werror"),
+    scalacOptions ++= Seq("-release", "17", "-deprecation", "-Werror"),
     javacOptions ++= Seq("-source", "17", "-target", "17"),
     libraryDependencies ++= Seq(
       // zio-http pulls in netty-pkitesting (test-certificate generation) and with it
@@ -113,7 +113,7 @@ lazy val sbta = (project in file("."))
       "org.ow2.asm"    % "asm"          % "9.11"     % Test,
       ("org.scala-sbt" % "sbt-launch"   % SbtLaunchVersion % SbtLaunch).intransitive(),
       "com.guardsquare" % "proguard-base" % "7.10.0" % Proguard,
-      "com.jamesward" % "skills" % "0.0.19" % Skills,
+      "com.jamesward" % "skills" % "0.0.21" % Skills,
     ),
     ivyConfigurations ++= Seq(SbtLaunch, Proguard),
     crossPaths := false,
