@@ -45,5 +45,3 @@ works.
   without `./sbta sbtaInstall`. Restart the MCP client to pick up sbta changes.
 - The sbta jar targets Java 17 bytecode (`-release 17`): it runs in the JVM of the
   build it launches, and sbt builds run on JDK 17 and newer. Development and CI use Java 25.
-- No `-language:strictEquality` yet: it reports 16 comparisons in the main sources
-  (enums without `CanEqual`, `java.nio.file.Path`, `Json`) that need migrating first.

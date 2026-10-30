@@ -98,7 +98,7 @@ lazy val sbta = (project in file("."))
     name := "sbta",
     description := "sbta: an sbt launcher whose --mcp serves MCP over stdio as a client of the build's sbt server",
     scalaVersion := "3.10.0",
-    scalacOptions ++= Seq("-release", "17", "-deprecation", "-Werror"),
+    scalacOptions ++= Seq("-release", "17", "-language:strictEquality", "-deprecation", "-Werror"),
     javacOptions ++= Seq("-source", "17", "-target", "17"),
     libraryDependencies ++= Seq(
       // zio-http pulls in netty-pkitesting (test-certificate generation) and with it

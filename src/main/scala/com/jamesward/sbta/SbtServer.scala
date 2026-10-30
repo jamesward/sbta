@@ -12,7 +12,7 @@ import scala.jdk.CollectionConverters.*
 import scala.util.control.NonFatal
 
 /** How `sbta --mcp` starts the build's sbt server when it isn't running. */
-enum StartMode:
+enum StartMode derives CanEqual:
   case Eager, Lazy, Never
 
 /**
@@ -300,6 +300,7 @@ object SbtServer:
 
 /** A compiler diagnostic from BSP `build/publishDiagnostics`. */
 final case class Diagnostic(severity: String, file: Option[String], line: Option[Int], column: Option[Int], message: String)
+    derives CanEqual
 
 /** A JVM sbt 2 asked the client to start (`sbt/clientJob`, for `run`/`runMain` over the network). */
 final case class ClientJob(params: Json)
