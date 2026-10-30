@@ -194,6 +194,7 @@ object LauncherSpec extends ZIOSpecDefault:
       everyTool(dir),
       reloadThroughSbtTask(dir),
       failedReloadThroughSbtTask(sbtVersion),
+      rebootThroughSbtTask(sbtVersion),
       updateThroughScript(sbtVersion),
     ) @@ TestAspect.sequential @@ TestAspect.afterAll(ZIO.succeed {
       script(dir, List("--client", "shutdown"), timeoutSeconds = 60)
@@ -381,6 +382,66 @@ object LauncherSpec extends ZIOSpecDefault:
           text(recovered).contains("[ok] reload"),
           text(after).contains("leaf"),
           !text(after).contains("The build files don't load"),
+        )
+      }
+    } @@ TestAspect.ifProp("os.name")(!_.toLowerCase.contains("win"))
+
+  /**
+   * After a change of `sbt.version`, `reboot` through `sbt-task` (sbt closes the channel
+   * and loads the new version in the same JVM) returns, with the commands after it run on
+   * the new server, and a reboot to a version that doesn't exist reports why, quickly.
+   */
+  private def rebootThroughSbtTask(sbtVersion: String) =
+    test("sbt-task `reboot` after an sbt.version change switches versions and runs the rest of the line; a failed reboot reports why") {
+      val dir   = build(sbtVersion)
+      val props = dir.resolve("project/build.properties")
+      // A neighbouring release: 1.12.11 → 1.12.10, 2.0.11 → 2.0.10.
+      val other = sbtVersion.split('.') match
+        case Array(a, b, c) => s"$a.$b.${c.toInt - 1}"
+        case _              => sbtVersion
+      def call(mcp: McpProcess, id: Int, command: String, timeoutSeconds: Long) =
+        mcp.send(s"""{"jsonrpc":"2.0","id":$id,"method":"tools/call","params":{"name":"sbt-task","arguments":{"command":"$command"}}}""")
+        mcp.response(id, timeoutSeconds)
+      ZIO.attemptBlocking {
+        val mcp = McpProcess.start(
+          dir,
+          List(Path.of(java.lang.System.getProperty("java.home"), "bin", "java").toString, "-jar", jar.toString, "--mcp", "--docs-url=none"),
+          Map("SBTA_RELEASES_URL" -> repo.toUri.toString),
+        )
+        try
+          mcp.send("""{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"spec","version":"1"}}}""")
+          mcp.send("""{"jsonrpc":"2.0","method":"notifications/initialized"}""")
+          mcp.response(1, 60)
+          val before = call(mcp, 2, "leaf/sbtVersion", 300)
+          Files.writeString(props, s"sbt.version=$other\n")
+          // Before the fix, no answer: sbt closes the channel to reboot, without a response.
+          val reboot = call(mcp, 3, "reboot; leaf/sbtVersion", 300)
+          val after  = call(mcp, 4, "leaf/sbtVersion", 120)
+          Files.writeString(props, "sbt.version=1.99.99\n")
+          val failed = call(mcp, 5, "reboot", 180)
+          Files.writeString(props, s"sbt.version=$sbtVersion\n")
+          val back = call(mcp, 6, "leaf/sbtVersion", 300)
+          (before, reboot, after, failed, back)
+        finally
+          mcp.close()
+          Files.writeString(props, s"sbt.version=$sbtVersion\n")
+          stopSbt(dir)
+          deleteRecursively(dir)
+      }.map { case (before, reboot, after, failed, back) =>
+        def text(r: Option[Json]) = r.map(_.toJson).getOrElse("")
+        assertTrue(
+          text(before).contains(sbtVersion),
+          reboot.isDefined,
+          text(reboot).contains("[ok] reboot; leaf/sbtVersion"),
+          text(reboot).contains("sbt rebooted"),
+          text(reboot).contains(other),
+          text(after).contains("[ok] leaf/sbtVersion"),
+          text(after).contains(other),
+          failed.isDefined,
+          text(failed).contains("exited while rebooting"),
+          text(failed).contains("1.99.99"), // the launcher's error, from the boot log
+          text(back).contains("[ok] leaf/sbtVersion"),
+          text(back).contains(sbtVersion),
         )
       }
     } @@ TestAspect.ifProp("os.name")(!_.toLowerCase.contains("win"))
