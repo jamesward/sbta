@@ -195,6 +195,7 @@ object LauncherSpec extends ZIOSpecDefault:
       reloadThroughSbtTask(dir),
       failedReloadThroughSbtTask(sbtVersion),
       rebootThroughSbtTask(sbtVersion),
+      failedChainThroughSbtTask(sbtVersion),
       updateThroughScript(sbtVersion),
     ) @@ TestAspect.sequential @@ TestAspect.afterAll(ZIO.succeed {
       script(dir, List("--client", "shutdown"), timeoutSeconds = 60)
@@ -382,6 +383,50 @@ object LauncherSpec extends ZIOSpecDefault:
           text(recovered).contains("[ok] reload"),
           text(after).contains("leaf"),
           !text(after).contains("The build files don't load"),
+        )
+      }
+    } @@ TestAspect.ifProp("os.name")(!_.toLowerCase.contains("win"))
+
+  /**
+   * A command line whose last part fails gets sbt's generic error (`-33000`, no message):
+   * the status says which task failed, from the output, and a command sbt can't parse
+   * says why. Neither is "could not parse" for a chain that ran.
+   */
+  private def failedChainThroughSbtTask(sbtVersion: String) =
+    test("sbt-task: a chain that ran and failed reports the failed task; an unparsable command reports sbt's parse error") {
+      val dir = build(sbtVersion)
+      Files.createDirectories(dir.resolve("leaf/src/test/scala"))
+      Files.writeString(dir.resolve("leaf/src/test/scala/Broken.scala"), "object Broken { val x: Int = \"no\" }\n")
+      def status(r: Option[Json]) =
+        r.flatMap(path(_, "result", "content")).collect { case Json.Arr(items) => items.toList }.getOrElse(Nil)
+          .flatMap(path(_, "text")).collect { case Json.Str(t) => t }.headOption.getOrElse("").linesIterator.nextOption().getOrElse("")
+      ZIO.attemptBlocking {
+        val mcp = McpProcess.start(
+          dir,
+          List(Path.of(java.lang.System.getProperty("java.home"), "bin", "java").toString, "-jar", jar.toString, "--mcp", "--docs-url=none"),
+          Map("SBTA_RELEASES_URL" -> repo.toUri.toString),
+        )
+        try
+          mcp.send("""{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"spec","version":"1"}}}""")
+          mcp.send("""{"jsonrpc":"2.0","method":"notifications/initialized"}""")
+          mcp.response(1, 60)
+          mcp.send("""{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"sbt-task","arguments":{"command":"reload; leaf / Compile / compile; leaf / Test / compile"}}}""")
+          val chain = mcp.response(2, 300)
+          mcp.send("""{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"sbt-task","arguments":{"command":"nosuchcommand"}}}""")
+          val parse = mcp.response(3, 120)
+          (status(chain), status(parse))
+        finally
+          mcp.close()
+          stopSbt(dir)
+          deleteRecursively(dir)
+      }.map { case (chain, parse) =>
+        assertTrue(
+          chain.startsWith("[error] reload; leaf / Compile / compile; leaf / Test / compile: "),
+          chain.contains("Test"),
+          chain.contains("Compilation failed"),
+          !chain.contains("parse"),
+          parse.startsWith("[error] nosuchcommand: "),
+          parse.contains("Not a valid command: nosuchcommand"),
         )
       }
     } @@ TestAspect.ifProp("os.name")(!_.toLowerCase.contains("win"))

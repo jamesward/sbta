@@ -534,7 +534,7 @@ final class Session private (server: SbtServer, log: String => Unit) extends Aut
           None
         // -33000 with an empty message: the command failed (sbt reports why in the output, e.g. a
         // parse error or a failed task), or a command before it on the line did.
-        case e: RpcError if e.code == -33000 && e.message.isEmpty => Some("the command failed (see the log for sbt's error)")
+        case e: RpcError if e.code == -33000 && e.message.isEmpty => Some(Session.GenericFailure)
         // -33000 with the command line itself: the command was cancelled or not run.
         case e: RpcError if e.code == -33000 => Some(s"not completed: ${e.message} (cancelled, or an earlier part failed)")
         case e: RpcError                     => Some(e.message)
@@ -579,6 +579,8 @@ final class Session private (server: SbtServer, log: String => Unit) extends Aut
             "the build failed to load; sbt kept the build it had loaded before. Fix the build files and `reload` again" +
               (if errors.isEmpty then " (the error is in the log)" else s". The load error:\n$errors")
           )
+        // sbt's answer doesn't say why: say what its output does.
+        else if error.contains(Session.GenericFailure) then Some(Session.failureSummary(text).getOrElse(Session.GenericFailure))
         else error
       // Remember a broken build (for the note on later results) until a load succeeds.
       if failedLoad then server.loadFailed(errors)
@@ -713,6 +715,26 @@ object Session:
   /** What sbt 1 and 2 ask (`BuiltinCommands.doLoadFailed`) when loading the build fails. */
   val LoadFailedPrompt = "Project loading failed: (r)etry, (q)uit, (l)ast, or (i)gnore? (default: r)"
   val LoadFailedAnswer = "Project loading failed (sbta answered sbt's prompt with (i)gnore: sbt keeps the build it had loaded)"
+  /** sbt's answer to a failed command (`-33000`, no message): a parse error or a failed task, said only in the output. */
+  val GenericFailure = "the command failed (see the log for sbt's error)"
+
+  private val TaskFailed = """^\[error\] (\([^)]+\) .+)$""".r
+  private val ErrorLine  = """^\[error\] ?(.*)$""".r
+
+  /**
+   * Why a command failed, from its output: the tasks that failed, as sbt summarizes them
+   * (`[error] (Test / testFull) sbt.TestsFailedException: Tests unsuccessful`), or else
+   * the error that starts sbt's message for a command it couldn't parse.
+   */
+  def failureSummary(output: String): Option[String] =
+    val errors = output.linesIterator.collect { case ErrorLine(e) => e.stripTrailing }.toVector
+    val tasks  = output.linesIterator.collect { case TaskFailed(t) => t.trim }.toVector.distinct
+    def timing(e: String) = e.startsWith("Total time:") || e.startsWith("elapsed time:")
+    if tasks.nonEmpty then
+      Some(tasks.take(5).mkString("; ") + (if tasks.size > 5 then s"; and ${tasks.size - 5} more" else ""))
+    // No task failed: sbt couldn't parse the command, and its first error line says why.
+    else errors.map(_.trim).find(e => e.nonEmpty && !timing(e)).map(_.take(500))
+
   /** What sbt prints when it (re)loads the build. */
   val LoadingMarker = "loading project definition from"
   /** What sbt prints when a load has succeeded. */
