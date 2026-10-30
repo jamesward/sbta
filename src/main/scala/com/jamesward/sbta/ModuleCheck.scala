@@ -41,7 +41,7 @@ object ModuleCheck {
     def label: String = s"$projectId/$configuration"
   }
 
-  enum Scope {
+  enum Scope derives CanEqual {
     /** Requested files plus module sources changed since the last compile. */
     case Files
     /** Every source of the module (with requested content overlays). */

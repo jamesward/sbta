@@ -386,7 +386,7 @@ object BuildTools:
       CallToolResult(content = Chunk(ToolContent.text(output.json.toJson)), structuredContent = Some(output.json))
 
   private def dropNulls(json: Json): Json = json match
-    case Json.Obj(fields) => Json.Obj(fields.collect { case (k, v) if v != Json.Null => k -> dropNulls(v) })
+    case Json.Obj(fields) => Json.Obj(fields.collect { case (k, v) if v.asNull.isEmpty => k -> dropNulls(v) })
     case Json.Arr(items)  => Json.Arr(items.map(dropNulls))
     case other            => other
 

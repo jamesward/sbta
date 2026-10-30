@@ -166,7 +166,7 @@ object SbtaSpec extends ZIOSpecDefault:
         val s = session(dir, socket)
         try
           val r = s.exec("compile")
-          assertTrue(r.success, seen.toArray.count(_ == "sbt/attach") == 2, seen.contains("answered:false"))
+          assertTrue(r.success, seen.toArray(Array.empty[String]).count(_ == "sbt/attach") == 2, seen.contains("answered:false"))
         finally s.close()
       }
     },
@@ -187,7 +187,7 @@ object SbtaSpec extends ZIOSpecDefault:
             rest.output.contains("sbt rebooted"),
             rest.output.contains("[info] running compile"), // on the new connection
             next.success, // the session stays connected to the new server
-            seen.toArray.count(_ == "initialize") == 3,
+            seen.toArray(Array.empty[String]).count(_ == "initialize") == 3,
           )
         finally s.close()
       }
@@ -566,7 +566,7 @@ object SbtaSpec extends ZIOSpecDefault:
         assertTrue(
           noted.content.size == 2,
           noted.content.last == ToolContent.text(Updates.mcpNote("0.2.0", v("0.3.0"))),
-          noted.structuredContent == result.structuredContent,
+          noted.structuredContent.map(_.toJson) == result.structuredContent.map(_.toJson),
           instructions.exists(_.contains("update-sbta")),
           offResult == result,
           offInstructions.isDefined,

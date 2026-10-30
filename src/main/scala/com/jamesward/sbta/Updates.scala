@@ -27,7 +27,7 @@ import scala.util.control.NonFatal
 object Updates:
 
   /** A semver version: `major.minor.patch`, with an optional pre-release (`-RC1`) and build (`+abc`). */
-  final case class Version(major: Int, minor: Int, patch: Int, preRelease: Option[String]):
+  final case class Version(major: Int, minor: Int, patch: Int, preRelease: Option[String]) derives CanEqual:
     def isRelease: Boolean = preRelease.isEmpty
     override def toString: String = s"$major.$minor.$patch${preRelease.fold("")("-" + _)}"
 
@@ -78,7 +78,7 @@ object Updates:
   // ---- the daily check ----
 
   /** What the last check found: when it ran (epoch millis, also when it failed) and the newest release it saw. */
-  final case class Checked(checkedAt: Long, latest: Option[String])
+  final case class Checked(checkedAt: Long, latest: Option[String]) derives CanEqual
   object Checked:
     given JsonCodec[Checked] = DeriveJsonCodec.gen[Checked]
 

@@ -25,7 +25,7 @@ object Setup:
     "timeout" -> Json.Num(1800000),
   )
 
-  enum Client(val id: String, val label: String, val config: String):
+  enum Client(val id: String, val label: String, val config: String) derives CanEqual:
     case Kiro   extends Client("kiro", "Kiro", ".kiro/settings/mcp.json")
     case Claude extends Client("claude", "Claude Code", ".mcp.json")
     case Cursor extends Client("cursor", "Cursor", ".cursor/mcp.json")

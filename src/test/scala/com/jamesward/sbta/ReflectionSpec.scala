@@ -24,7 +24,7 @@ import scala.jdk.CollectionConverters.*
  */
 object ReflectionSpec extends ZIOSpecDefault:
 
-  enum Kind:
+  enum Kind derives CanEqual:
     case ClassByName, Field, Method, Members, Other
 
   /** Reflective entry points and what they look up. */
