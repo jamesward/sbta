@@ -18,7 +18,7 @@ set _JAVACMD=
 set _SBT_OPTS=
 set _JAVA_OPTS=
 
-set init_sbt_version=2.0.11
+set init_sbt_version=2.0.12
 rem sbta: this build's own sbta jar, relative to this script (written by `sbtaInstall`).
 rem Until it exists, this script is plain sbt and runs sbt's launcher.
 set sbta_local_jar=target\sbta-local\sbta.jar

@@ -5,6 +5,10 @@ on:
   # The release workflow runs these same tests before it publishes.
   workflow_call:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
