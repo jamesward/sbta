@@ -96,8 +96,16 @@ these engines started.
   that sent it, so a call's output is its own.
 - **Commands** go through `sbt/exec` (queued on sbt's command loop, `Queued`
   notifications while waiting). Response: a result (done), `-32603` (failed, with
-  sbt's message), `-33000` with an empty message (couldn't parse) or with the
-  command line (cancelled). An interrupted call sends `sbt/cancelRequest {id}`.
+  sbt's message), `-33000` with an empty message (the command failed: a parse error or
+  a failed task, reported in its output) or with the command line (cancelled). An
+  interrupted call sends `sbt/cancelRequest {id}`.
+- **`reboot`** (sbt's way to switch to a changed `sbt.version`) gets no response: sbt
+  sends the channel a `shutdown` notification, `[log, [execId, remainingCommands]]`,
+  closes it, and loads sbt again in the same JVM. sbta then does what sbtn does: waits
+  for a new `active.json`, reconnects, and runs the rest of the command line there.
+  A reboot that fails (sbt can't get the new version) ends the JVM: sbta notices the
+  server process is gone (the `--detach-stdio` JVMs seen at the reboot; on Linux only
+  the build's, by working directory) and starts sbt itself, to report its error.
 - **A build that fails to load** makes sbt ask "(r)etry, (q)uit, (l)ast, or (i)gnore?"
   and read stdin. For a command of sbta's channel sbt reads that channel
   (`sbt/readSystemIn`): sbta answers `i` (keep the build loaded before; `r` would fail

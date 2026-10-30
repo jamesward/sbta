@@ -39,20 +39,32 @@ object SbtaSpec extends ZIOSpecDefault:
   private def field(m: Json, name: String): Option[Json] = m.asObject.flatMap(_.get(name))
   private def str(m: Json, name: String): String         = field(m, name).collect { case Json.Str(s) => s }.getOrElse("")
 
-  /** Serves one connection: what a real sbt does for initialize, attach, exec and cancel. Returns the socket and the requests seen. */
+  /**
+   * Serves connections one after another: what a real sbt does for initialize, attach,
+   * exec, cancel and reboot. Returns the socket and the requests seen.
+   */
   private def fakeSbt(dir: Path, dropFirstAttach: Boolean = false): (Path, java.util.concurrent.ConcurrentLinkedQueue[String]) =
     val socket = dir.resolve("sock")
     val seen   = java.util.concurrent.ConcurrentLinkedQueue[String]()
     val server = ServerSocketChannel.open(StandardProtocolFamily.UNIX)
     server.bind(UnixDomainSocketAddress.of(socket))
-    val thread = Thread { () =>
-      val channel = server.accept()
+    var dropAttach = dropFirstAttach
+    lazy val thread = Thread { () =>
+      try
+        while true do
+          val channel = server.accept()
+          try serve(channel)
+          catch case _: Exception => ()
+          finally channel.close()
+      catch case _: Exception => ()
+      finally server.close()
+    }
+    def serve(channel: java.nio.channels.SocketChannel): Unit =
       val in      = BufferedInputStream(Channels.newInputStream(channel))
       val out     = Channels.newOutputStream(channel)
       var running: Option[String] = None
-      var dropAttach              = dropFirstAttach
-      try
-        while true do
+      var open                    = true
+      while open do
           val m      = readMessage(in)
           val method = str(m, "method")
           val id     = field(m, "id").map(_.toJson).getOrElse("null")
@@ -78,6 +90,16 @@ object SbtaSpec extends ZIOSpecDefault:
                    |"severity":1,"message":"Found: \\u001b[32mString\\u001b[0m"}],"reset":true}}""".stripMargin.replace("\n", ""))
               command match
                 case "fail" => write(out, s"""{"jsonrpc":"2.0","id":$id,"error":{"code":-32603,"message":"(Compile / compile) Compilation failed"}}""")
+                // What sbt answers for a command that failed (a parse error, a failed task).
+                case "fail-quietly" => write(out, s"""{"jsonrpc":"2.0","id":$id,"error":{"code":-33000,"message":""}}""")
+                case reboot if reboot.startsWith("reboot") =>
+                  // As sbt's CommandExchange.reboot: tell the channel what's left of the line, close it,
+                  // and write active.json anew when the (same JVM's) new server is up.
+                  val rest = reboot.split(';').drop(1).map(_.trim).mkString(";")
+                  write(out, s"""{"jsonrpc":"2.0","method":"shutdown","params":[true,[${id},"$rest"]]}""")
+                  open = false
+                  Thread.sleep(50)
+                  writeActive(dir, socket)
                 case "slow" => running = Some(id) // answered when cancelled
                 case "reload-broken" =>
                   // As sbt's doLoadFailed: the error and the prompt, then a read of the channel's stdin.
@@ -96,12 +118,16 @@ object SbtaSpec extends ZIOSpecDefault:
               write(out, s"""{"jsonrpc":"2.0","id":$id,"result":{"status":"Task cancelled"}}""")
               running.foreach(r => write(out, s"""{"jsonrpc":"2.0","id":$r,"error":{"code":-33000,"message":"slow"}}"""))
             case _ => ()
-      catch case _: Exception => ()
-      finally server.close()
-    }
     thread.setDaemon(true)
     thread.start()
     (socket, seen)
+
+  /** `project/target/active.json`, as sbt writes it when its server starts. */
+  private def writeActive(dir: Path, socket: Path): Unit =
+    Files.createDirectories(dir.resolve("project/target"))
+    val file = dir.resolve("project/target/active.json")
+    Files.deleteIfExists(file)
+    Files.writeString(file, s"""{"uri":"local://$socket"}""")
 
   private def withBuild[A](f: Path => A): A =
     val dir = Files.createTempDirectory("sbta-spec")
@@ -136,6 +162,38 @@ object SbtaSpec extends ZIOSpecDefault:
         try
           val r = s.exec("compile")
           assertTrue(r.success, seen.toArray.count(_ == "sbt/attach") == 2, seen.contains("answered:false"))
+        finally s.close()
+      }
+    },
+    test("`reboot`: sbt closes the channel, and the session reconnects to the new server and runs the rest of the line there") {
+      withBuild { dir =>
+        val (socket, seen) = fakeSbt(dir)
+        writeActive(dir, socket)
+        val s = session(dir, socket)
+        try
+          val alone = s.exec("reboot")
+          val rest  = s.exec("reboot; compile")
+          val next  = s.exec("compile")
+          assertTrue(
+            alone.success,
+            alone.output.contains("sbt rebooted"),
+            rest.success,
+            rest.commandLine == "reboot; compile",
+            rest.output.contains("sbt rebooted"),
+            rest.output.contains("[info] running compile"), // on the new connection
+            next.success, // the session stays connected to the new server
+            seen.toArray.count(_ == "initialize") == 3,
+          )
+        finally s.close()
+      }
+    },
+    test("a command that fails with sbt's generic error is reported as failed (not as a parse error)") {
+      withBuild { dir =>
+        val (socket, _) = fakeSbt(dir)
+        val s = session(dir, socket)
+        try
+          val r = s.exec("fail-quietly")
+          assertTrue(!r.success, r.error.contains("the command failed (see the log for sbt's error)"))
         finally s.close()
       }
     },

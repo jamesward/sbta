@@ -25,12 +25,20 @@ final class SbtServer(val base: Path, start: StartMode, log: String => Unit):
 
   private val activeFile = base.resolve("project").resolve("target").resolve("active.json")
   val runtimeDir: Path   = base.resolve("project").resolve("target").resolve("sbta")
-  private val bootLog    = runtimeDir.resolve("boot.log")
+  val bootLog: Path       = runtimeDir.resolve("boot.log")
 
   /** How long a call waits for sbt to start (a first start may download a lot). */
-  private val StartWait = java.time.Duration.ofMinutes(15)
+  val StartWait = java.time.Duration.ofMinutes(15)
 
-  @volatile private var lastFailure: Option[(Long, String)] = None
+  /** Which `active.json` this is (sbt writes it anew when its server starts), or None without one. */
+  private[sbta] def activeStamp(): Option[String] =
+    try
+      val attrs = Files.readAttributes(activeFile, classOf[java.nio.file.attribute.BasicFileAttributes])
+      Some(s"${attrs.lastModifiedTime.toMillis}/${attrs.fileKey}")
+    catch case NonFatal(_) => None
+
+  /** The last failed start: when, the build files then, and why. Retried after 30 s, or once the build files change. */
+  @volatile private var lastFailure: Option[(Long, Vector[String], String)] = None
 
   /**
    * Changes when anything that can change the loaded build does: the build definition
@@ -119,8 +127,9 @@ final class SbtServer(val base: Path, start: StartMode, log: String => Unit):
       if start == StartMode.Never then
         throw IOException(s"sbt is not running in $base (and sbta was started with --start=never). Start sbt in the build, then retry.")
       lastFailure match
-        case Some((at, failure)) if System.currentTimeMillis() - at < 30_000 => throw IOException(failure)
-        case _                                                              => ()
+        case Some((at, files, failure)) if System.currentTimeMillis() - at < 30_000 && files == buildFingerprint() =>
+          throw IOException(failure)
+        case _ => ()
       boot()
     }
   }
@@ -145,7 +154,25 @@ final class SbtServer(val base: Path, start: StartMode, log: String => Unit):
     try f(session)
     finally session.close()
 
+  /**
+   * The sbt server JVMs running now (`--detach-stdio`, as sbtn starts them); on Linux only
+   * this build's, by working directory (elsewhere other builds' servers are included).
+   */
+  private[sbta] def serverPids(): Set[Long] =
+    val root = try base.toRealPath() catch case NonFatal(_) => base.toAbsolutePath.normalize
+    def cwd(p: ProcessHandle) = try Some(Path.of(s"/proc/${p.pid}/cwd").toRealPath()) catch case NonFatal(_) => None
+    try
+      ProcessHandle.allProcesses().iterator.asScala.filter { p =>
+        val info = p.info
+        (info.arguments().orElse(Array.empty[String]).exists(_.contains("--detach-stdio")) ||
+          info.commandLine().orElse("").contains("--detach-stdio")) &&
+        cwd(p).forall(_ == root)
+      }.map(_.pid).toSet
+    catch case NonFatal(_) => Set.empty
+
   /** The socket `active.json` names, unchecked. */
+  private[sbta] def activeSocketPath(): Option[Path] = activeSocket()
+
   private def activeSocket(): Option[Path] =
     try
       if !Files.isRegularFile(activeFile) then None
@@ -163,7 +190,9 @@ final class SbtServer(val base: Path, start: StartMode, log: String => Unit):
     if code != 0 && socket().isEmpty then
       log(s"`sbt --client` exited with $code; trying the JVM client")
       code = runSbt("--jvm-client")
-    val deadline = started + StartWait.toNanos
+    // `--client` returns once the server runs; the socket can lag a little behind it. A
+    // client that failed (e.g. sbt couldn't get the build's `sbt.version`) started nothing.
+    val deadline = if code == 0 then started + StartWait.toNanos else System.nanoTime() + 5_000_000_000L
     var found    = socket()
     while found.isEmpty && System.nanoTime() < deadline do
       Thread.sleep(250)
@@ -176,7 +205,7 @@ final class SbtServer(val base: Path, start: StartMode, log: String => Unit):
       case None =>
         val failure =
           s"sbt did not start in $base (exit code $code). Last lines of $bootLog:\n${SbtServer.tail(bootLog, 25)}"
-        lastFailure = Some(System.currentTimeMillis() -> failure)
+        lastFailure = Some((System.currentTimeMillis(), buildFingerprint(), failure))
         log(failure)
         throw IOException(failure)
 
@@ -279,7 +308,96 @@ final case class ExecResult(
  * (including forked tests and programs) comes back as `sbt/systemOut` bytes. sbt
  * sends a command's output to the channel that sent it, so each call gets its own.
  */
-final class Session private (server: SbtServer, connection: SbtConnection, log: String => Unit) extends AutoCloseable:
+final class Session private (server: SbtServer, log: String => Unit) extends AutoCloseable:
+
+  @volatile private var connection: SbtConnection = null
+  /** Completed when sbt closes this channel to reboot (see [[Session.rebootOf]]). */
+  @volatile private var rebooting = CompletableFuture[(String, String)]()
+  /** The server JVMs when sbt said it was rebooting: it reboots in the same JVM, which exits if that fails. */
+  @volatile private var serversAtReboot = Set.empty[Long]
+
+  /** Connect to the server on `socket`: `initialize` and `sbt/attach`. */
+  private def connect(socket: Path): Unit =
+    rebooting = CompletableFuture()
+    val c = SbtConnection.open(socket, (method, params) => handle(method, params))
+    connection = c
+    try handshake(c)
+    catch
+      case e: Throwable =>
+        c.close()
+        throw e
+
+  private def handshake(c: SbtConnection): Unit =
+    val init = Json.Obj("initializationOptions" -> Json.Obj("skipAnalysis" -> Json.Bool(true)))
+    // Both at once, as sbt's own client does: with `sbt/attach` sent only after the
+    // `initialize` answer, sbt 1 asks a failed build load's "(r)etry, (q)uit…" on the
+    // server's own stdin instead of this channel's, and hangs.
+    val initialized = c.request("initialize", init)
+    val attach      = Json.Obj("interactive" -> Json.Bool(false))
+    var attached    = c.request("sbt/attach", attach)
+    def failed(e: java.util.concurrent.ExecutionException) = e.getCause match
+      case io: IOException => io
+      case other           => IOException(s"the connection handshake failed: $other", other)
+    try initialized._2.get(30, TimeUnit.SECONDS)
+    catch
+      case _: TimeoutException => throw IOException("sbt did not answer the connection handshake within 30 s")
+      case e: java.util.concurrent.ExecutionException => throw failed(e)
+    // sbt (1.12 at least) can drop an `sbt/attach` that arrives before it has registered
+    // the new channel: `NetworkChannel` starts reading in its constructor, and
+    // `channelForName` finds no channel yet, so nothing answers. Ask again, until one is
+    // answered (asking twice only replaces the channel's terminal).
+    val deadline = System.nanoTime() + 30_000_000_000L
+    var answered = Option.empty[Json]
+    while answered.isEmpty do
+      try answered = Some(attached._2.get(1, TimeUnit.SECONDS))
+      catch
+        case _: TimeoutException =>
+          if System.nanoTime() > deadline then throw IOException("sbt did not answer the connection handshake within 30 s")
+          log(s"sbt didn't answer sbt/attach ${attached._1} within 1 s; asking again")
+          attached = c.request("sbt/attach", attach)
+        case e: java.util.concurrent.ExecutionException => throw failed(e)
+
+  /**
+   * After sbt closed the channel to reboot: wait for its new server (the same JVM loads
+   * sbt again, downloading a changed `sbt.version` first, so this can take minutes), and
+   * connect to it. `activeBefore` is `active.json`'s timestamp before the reboot: the old
+   * server must not be mistaken for the new one.
+   */
+  private def reconnectAfterReboot(activeBefore: Option[String]): Unit =
+    connection.close()
+    val started  = System.nanoTime()
+    val deadline = started + server.StartWait.toNanos
+    var last     = Option.empty[String]
+    var done     = false
+    var diedAt   = Option.empty[Long]
+    while !done do
+      // A reboot that fails (e.g. sbt can't get the `sbt.version` it should switch to) ends the JVM.
+      if diedAt.isEmpty && serversAtReboot.exists(pid => !ProcessHandle.of(pid).map(_.isAlive).orElse(false)) then
+        diedAt = Some(System.nanoTime())
+      if diedAt.exists(at => System.nanoTime() - at > 3_000_000_000L) && server.activeStamp().forall(activeBefore.contains) then
+        log("sbt's server exited while rebooting: starting it again")
+        val socket =
+          try server.ensureRunning()
+          catch
+            case e: IOException => throw IOException(s"sbt's server exited while rebooting (the reboot failed). ${e.getMessage}", e)
+        connect(socket)
+        done = true
+      else if System.nanoTime() > deadline then
+        throw IOException(s"sbt rebooted, and its server didn't come back within ${server.StartWait.toMinutes} minutes" +
+          last.fold("")(e => s" (last connection error: $e)") + s". See ${server.bootLog} and `./sbta` in the build.")
+      else if !server.activeStamp().exists(stamp => !activeBefore.contains(stamp)) then Thread.sleep(250)
+      else
+        server.activeSocketPath() match
+          case None         => Thread.sleep(250)
+          case Some(socket) =>
+            try
+              connect(socket)
+              done = true
+            catch
+              case e: IOException =>
+                last = Some(e.getMessage)
+                Thread.sleep(500)
+    log(s"sbt rebooted: reconnected after ${(System.nanoTime() - started) / 1_000_000} ms")
 
   private val MaxOutput = 200_000
 
@@ -298,6 +416,14 @@ final class Session private (server: SbtServer, connection: SbtConnection, log: 
           append(String(raw, StandardCharsets.UTF_8))
         case _ => ()
     case "build/publishDiagnostics" => synchronized(addDiagnostics(params))
+    case "shutdown" =>
+      Session.rebootOf(params) match
+        case Some(reboot) =>
+          log(s"sbt is rebooting (the exec it ran: ${reboot._1}; commands left: \"${reboot._2}\")")
+          serversAtReboot = server.serverPids()
+          rebooting.complete(reboot)
+          ()
+        case None => ()
     case "sbt/clientJob"            => synchronized(clientJobs += ClientJob(params))
     case "sbt/exec" =>
       val fields = params.asObject.map(_.fields.toMap).getOrElse(Map.empty)
@@ -392,20 +518,50 @@ final class Session private (server: SbtServer, connection: SbtConnection, log: 
       if !r.success then throw RpcError(-32603, r.error.getOrElse("the build failed to load"))
 
   private def run(commandLine: String): ExecResult =
-    val fingerprint = server.buildFingerprint()
+    val fingerprint  = server.buildFingerprint()
+    val activeBefore = server.activeStamp()
     reset()
     val started      = System.nanoTime()
     val (id, future) = connection.request("sbt/exec", Json.Obj("commandLine" -> Json.Str(commandLine)))
+    var rebooted     = Option.empty[Session.Rebooted]
     val error =
       try
         await(id, future)
         None
       catch
-        // -33000 with an empty message: sbt couldn't parse the command (the reason is in the log).
-        case e: RpcError if e.code == -33000 && e.message.isEmpty => Some("sbt could not parse the command (see the log)")
+        case r: Session.Rebooted =>
+          rebooted = Some(r)
+          None
+        // -33000 with an empty message: the command failed (sbt reports why in the output, e.g. a
+        // parse error or a failed task), or a command before it on the line did.
+        case e: RpcError if e.code == -33000 && e.message.isEmpty => Some("the command failed (see the log for sbt's error)")
         // -33000 with the command line itself: the command was cancelled or not run.
         case e: RpcError if e.code == -33000 => Some(s"not completed: ${e.message} (cancelled, or an earlier part failed)")
         case e: RpcError                     => Some(e.message)
+    rebooted match
+      case Some(r) => afterReboot(commandLine, r, activeBefore, started)
+      case None    => finish(commandLine, fingerprint, started, error)
+
+  /**
+   * sbt closed the channel to reboot (`reboot`, e.g. to switch to a changed
+   * `sbt.version`): reconnect to its new server, then run the rest of the command line
+   * there, as sbtn does.
+   */
+  private def afterReboot(commandLine: String, r: Session.Rebooted, activeBefore: Option[String], started: Long): ExecResult =
+    val before = synchronized(Text.stripAnsi(output.toString))
+    reconnectAfterReboot(activeBefore)
+    // The new server loaded the build files as they are now.
+    server.loaded(server.buildFingerprint())
+    val note = s"[info] sbt rebooted; sbta reconnected to its new server (${(System.nanoTime() - started) / 1_000_000} ms)\n"
+    val head = before + (if before.isEmpty || before.endsWith("\n") then "" else "\n") + note
+    if r.remaining.trim.isEmpty then
+      reset()
+      ExecResult(commandLine, true, None, (System.nanoTime() - started) / 1_000_000, head, false, Nil, Nil)
+    else
+      val rest = run(r.remaining)
+      rest.copy(commandLine = commandLine, output = head + rest.output, elapsedMs = (System.nanoTime() - started) / 1_000_000)
+
+  private def finish(commandLine: String, fingerprint: Vector[String], started: Long, error: Option[String]): ExecResult =
     // Output written just before the response can arrive just after it (sbt batches console writes).
     awaitQuietOutput()
     // A (re)load from this channel: sbt has loaded the build files as they were when it started.
@@ -514,12 +670,25 @@ final class Session private (server: SbtServer, connection: SbtConnection, log: 
    * cancelled the call), ask sbt to cancel the running command, then give up.
    */
   private def await(id: String, future: CompletableFuture[Json]): Json =
-    try future.get()
+    val reboot = rebooting
+    def rebootedIfSo(): Unit =
+      if reboot.isDone && !(future.isDone && !future.isCompletedExceptionally) then
+        val (execId, remaining) = reboot.get()
+        throw Session.Rebooted(execId, remaining)
+    try
+      try CompletableFuture.anyOf(future, reboot).get()
+      catch case _: java.util.concurrent.ExecutionException => () // the request failed: see below
+      // A reboot closes the channel too (after its `shutdown` notification, so `reboot` is
+      // complete by then): report the reboot, not the closed connection.
+      rebootedIfSo()
+      future.get()
     catch
       case _: InterruptedException =>
         cancel(id)
         throw InterruptedException("cancelled")
-      case e: java.util.concurrent.ExecutionException => throw e.getCause
+      case e: java.util.concurrent.ExecutionException =>
+        rebootedIfSo()
+        throw e.getCause
 
   /** Ask sbt to cancel request `id`, waiting (at most 5 s, even if interrupted again) for its answer. */
   private def cancel(id: String): Unit =
@@ -573,39 +742,26 @@ object Session:
       case List(c, k)    => config(c).map(cfg => s"$cfg:$k")
       case _             => None
   def open(server: SbtServer, socket: Path, log: String => Unit): Session =
-    var session: Session = null
-    val connection = SbtConnection.open(socket, (method, params) => if session != null then session.handle(method, params))
-    session = Session(server, connection, log)
-    val init = Json.Obj("initializationOptions" -> Json.Obj("skipAnalysis" -> Json.Bool(true)))
-    // Both at once, as sbt's own client does: with `sbt/attach` sent only after the
-    // `initialize` answer, sbt 1 asks a failed build load's "(r)etry, (q)uit…" on the
-    // server's own stdin instead of this channel's, and hangs.
-    val initialized = connection.request("initialize", init)
-    val attach      = Json.Obj("interactive" -> Json.Bool(false))
-    var attached    = connection.request("sbt/attach", attach)
-    session.await0(initialized)
-    // sbt (1.12 at least) can drop an `sbt/attach` that arrives before it has registered
-    // the new channel: `NetworkChannel` starts reading in its constructor, and
-    // `channelForName` finds no channel yet, so nothing answers. Ask again, until one is
-    // answered (asking twice only replaces the channel's terminal).
-    val deadline = System.nanoTime() + 30_000_000_000L
-    var answered = Option.empty[Json]
-    while answered.isEmpty do
-      try answered = Some(attached._2.get(1, TimeUnit.SECONDS))
-      catch
-        case _: TimeoutException =>
-          if System.nanoTime() > deadline then throw IOException("sbt did not answer the connection handshake within 30 s")
-          log(s"sbt didn't answer sbt/attach ${attached._1} within 1 s; asking again")
-          attached = connection.request("sbt/attach", attach)
-        case e: java.util.concurrent.ExecutionException => throw e.getCause
+    val session = Session(server, log)
+    session.connect(socket)
     session
 
-  extension (s: Session)
-    private def await0(request: (String, CompletableFuture[Json])): Json =
-      try request._2.get(30, TimeUnit.SECONDS)
-      catch
-        case _: TimeoutException => throw IOException("sbt did not answer the connection handshake within 30 s")
-        case e: java.util.concurrent.ExecutionException => throw e.getCause
+  /**
+   * The `shutdown` notification's reboot part: sbt tells a channel it's closing it to
+   * reboot (`[logShutdown, [execId, remainingCommands]]`; `null` for a plain shutdown),
+   * for the client to reconnect and run what's left of the command line, as sbtn does.
+   */
+  def rebootOf(params: Json): Option[(String, String)] = params match
+    case Json.Arr(items) =>
+      items.lift(1).collect { case Json.Arr(pair) =>
+        (pair.lift(0), pair.lift(1)) match
+          case (Some(Json.Str(id)), Some(Json.Str(rest))) => Some((id, rest))
+          case _                                          => None
+      }.flatten
+    case _ => None
+
+  /** sbt closed the channel to reboot: the exec id it was running and the commands left after `reboot`. */
+  final case class Rebooted(execId: String, remaining: String) extends IOException("sbt is rebooting")
 
 object Text:
   private val Ansi = "\u001b\\[[0-9;?]*[ -/]*[@-~]".r
