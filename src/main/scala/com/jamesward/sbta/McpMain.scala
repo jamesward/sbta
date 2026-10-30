@@ -209,7 +209,7 @@ object McpMain:
         base,
         version,
         Updates.releasesBase(env),
-        () => try Updates.latestRelease(Updates.fetch(Updates.ReleasesApi)) catch case NonFatal(_) => None,
+        () => Updates.latest(),
         deferBat = false,
       )
 
