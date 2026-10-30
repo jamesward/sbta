@@ -92,6 +92,11 @@ object SbtaSpec extends ZIOSpecDefault:
                 case "fail" => write(out, s"""{"jsonrpc":"2.0","id":$id,"error":{"code":-32603,"message":"(Compile / compile) Compilation failed"}}""")
                 // What sbt answers for a command that failed (a parse error, a failed task).
                 case "fail-quietly" => write(out, s"""{"jsonrpc":"2.0","id":$id,"error":{"code":-33000,"message":""}}""")
+                case "fail-tests" =>
+                  val summary = "[error] (Test / testFull) sbt.TestsFailedException: Tests unsuccessful\n"
+                    .getBytes(StandardCharsets.UTF_8).map(_.toInt).mkString(",")
+                  write(out, s"""{"jsonrpc":"2.0","method":"sbt/systemOut","params":[$summary]}""")
+                  write(out, s"""{"jsonrpc":"2.0","id":$id,"error":{"code":-33000,"message":""}}""")
                 case reboot if reboot.startsWith("reboot") =>
                   // As sbt's CommandExchange.reboot: tell the channel what's left of the line, close it,
                   // and write active.json anew when the (same JVM's) new server is up.
@@ -194,6 +199,39 @@ object SbtaSpec extends ZIOSpecDefault:
         try
           val r = s.exec("fail-quietly")
           assertTrue(!r.success, r.error.contains("the command failed (see the log for sbt's error)"))
+        finally s.close()
+      }
+    },
+    test("a failed command's status says which tasks failed, or why sbt couldn't parse it, from its output") {
+      // As sbt 2 and sbt 1 print them.
+      val tests = """[info] Passed: Total 67, Failed 1, Errors 0, Passed 66
+                    |[error] Failed tests:
+                    |[error] \tdemo.RealCliSpec
+                    |[error] (Test / testFull) sbt.TestsFailedException: Tests unsuccessful
+                    |[error] elapsed time: 12 s (0:00:12.0)""".stripMargin
+      val aggregate = """[error] (leaf / Test / test) sbt.TestsFailedException: Tests unsuccessful
+                        |[error] (app / Compile / compileIncremental) Compilation failed
+                        |[error] Total time: 3 s, completed Oct 30, 2026""".stripMargin
+      val parse = """[error] Not a valid command: nosuchcommand
+                    |[error] Not a valid project ID: nosuchcommand
+                    |[error] nosuchcommand
+                    |[error]              ^""".stripMargin
+      assertTrue(
+        Session.failureSummary(tests).contains("(Test / testFull) sbt.TestsFailedException: Tests unsuccessful"),
+        Session.failureSummary(aggregate).contains(
+          "(leaf / Test / test) sbt.TestsFailedException: Tests unsuccessful; (app / Compile / compileIncremental) Compilation failed"
+        ),
+        Session.failureSummary(parse).contains("Not a valid command: nosuchcommand"),
+        Session.failureSummary("[info] done\n[error] elapsed time: 1 s").isEmpty,
+      )
+    },
+    test("a chain whose tests fail reports the failed task, not a parse error") {
+      withBuild { dir =>
+        val (socket, _) = fakeSbt(dir)
+        val s = session(dir, socket)
+        try
+          val r = s.exec("fail-tests")
+          assertTrue(!r.success, r.error.contains("(Test / testFull) sbt.TestsFailedException: Tests unsuccessful"))
         finally s.close()
       }
     },

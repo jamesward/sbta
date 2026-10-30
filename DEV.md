@@ -97,7 +97,9 @@ these engines started.
 - **Commands** go through `sbt/exec` (queued on sbt's command loop, `Queued`
   notifications while waiting). Response: a result (done), `-32603` (failed, with
   sbt's message), `-33000` with an empty message (the command failed: a parse error or
-  a failed task, reported in its output) or with the command line (cancelled). An
+  a failed task; sbta's status takes the reason from the output, sbt's
+  `[error] (<task>) <exception>` summary lines, or else its first error line) or with
+  the command line (cancelled). An
   interrupted call sends `sbt/cancelRequest {id}`.
 - **`reboot`** (sbt's way to switch to a changed `sbt.version`) gets no response: sbt
   sends the channel a `shutdown` notification, `[log, [execId, remainingCommands]]`,
