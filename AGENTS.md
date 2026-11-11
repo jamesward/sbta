@@ -9,7 +9,7 @@ works.
 - Follow the `zen-of-projects` Skill; this file records only project-specific facts and exceptions.
 - For Scala 3 and ZIO code (writing or reviewing it), follow `zen-of-scala`.
 - For design, domain modeling, effects and testing strategy, follow `zen-of-james`.
-- Get them with `./sbta extractSkillsJars` (into the gitignored `.kiro/skills/`), and read the relevant ones before working.
+- Get them over MCP from the `sbta` server when your client loads MCP skills (its instructions say so); otherwise with `./sbta extractSkillsJars` (into the gitignored `.kiro/skills/`). Read the relevant ones before working.
 
 ## MCP
 

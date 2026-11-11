@@ -65,7 +65,21 @@ lazy val reader310 = (project in file("reader-3.10"))
     libraryDependencies := Seq("ch.epfl.scala" %% "tasty-query" % "1.10.0"),
   )
 
-/** The code-tool runtimes as resources: the `check` bridge, the symbol runtime, and every TASTy Query reader. */
+// ---- the bridge sbta loads into a running sbt server (`apply -cp`), one per sbt line ----
+
+// Compiled against the oldest sbt of each line sbta supports (Provided: never embedded),
+// with that line's Scala, and linked at runtime against the server's own sbt.
+def sbtBridge(sbtVersion: String, scala: String) = Seq(
+  publish / skip := true,
+  scalaVersion := scala,
+  scalacOptions ++= (if (scala.startsWith("2.")) Seq("-deprecation", "-Xfatal-warnings") else Seq("-deprecation", "-Werror")),
+  libraryDependencies += "org.scala-sbt" %% "main" % sbtVersion % Provided,
+  Compile / unmanagedSourceDirectories += baseDirectory.value / ".." / "shared",
+)
+lazy val sbtBridge1 = (project in file("sbt-bridge/sbt1")).settings(sbtBridge("1.4.9", "2.12.21"))
+lazy val sbtBridge2 = (project in file("sbt-bridge/sbt2")).settings(sbtBridge("2.0.0", "3.8.4"))
+
+/** The embedded runtimes as resources: the `check` bridge, the symbol runtime, every TASTy Query reader, and the sbt bridges. */
 def codeToolAssets: Def.Initialize[Task[Seq[File]]] = Def.task {
   val converter = fileConverter.value
   val out       = (Compile / resourceManaged).value
@@ -84,6 +98,8 @@ def codeToolAssets: Def.Initialize[Task[Seq[File]]] = Def.task {
     reader18                                         -> out / "sbta-symbol" / "tasty-query-1.8.0.jar",
     readerJar((reader39 / Compile / update).value, "1.9.0")   -> out / "sbta-readers" / "tasty-query-1.9.0.jar",
     readerJar((reader310 / Compile / update).value, "1.10.0") -> out / "sbta-readers" / "tasty-query-1.10.0.jar",
+    converter.toPath((sbtBridge1 / Compile / packageBin).value).toFile -> out / "sbta-bridge" / "sbt1.jar",
+    converter.toPath((sbtBridge2 / Compile / packageBin).value).toFile -> out / "sbta-bridge" / "sbt2.jar",
   )
   files.foreach { case (source, target) => IO.copyFile(source, target) }
   files.map(_._2)
@@ -103,7 +119,7 @@ lazy val sbta = (project in file("."))
     libraryDependencies ++= Seq(
       // zio-http pulls in netty-pkitesting (test-certificate generation) and with it
       // Bouncy Castle (~11 MB): sbta never serves TLS, so leave them out of the jar.
-      ("com.jamesward" %% "zio-http-mcp" % "0.12.2")
+      ("com.jamesward" %% "zio-http-mcp" % "0.13.2")
         .exclude("io.netty", "netty-pkitesting")
         .exclude("org.bouncycastle", "bcprov-jdk18on")
         .exclude("org.bouncycastle", "bcpkix-jdk18on")
@@ -257,7 +273,7 @@ lazy val sbta = (project in file("."))
       s"-Dsbta.version=${version.value}",
     ),
 
-    // SkillsJars: extract agent Skills with `./sbt extractSkillsJars`
+    // SkillsJars: served by `./sbta --mcp`, or extracted with `./sbta extractSkillsJars`
     skillsJarsOutputDir := Some(file(".kiro/skills")),
   )
   .aggregate(symbolRuntime)

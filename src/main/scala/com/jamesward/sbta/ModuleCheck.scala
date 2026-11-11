@@ -10,8 +10,9 @@ import scala.util.control.NonFatal
  * Process-global state and logic behind the `check` tool: a fast, warm,
  * compile-free validation of Scala 3 sources against one module's classpath.
  *
- * [[SbtMcpPlugin]] computes a [[ModuleConfig]] per (project, configuration) on the
- * sbt command loop and pushes it here. [[check]] then runs entirely off the loop
+ * [[CodeTools]] builds a [[ModuleConfig]] per (project, configuration) from the
+ * build's BSP data and hands it to [[SbtaCheck]]. [[check]] then runs entirely off
+ * sbt's command loop
  * (it never waits behind a `~` watch) with a cached, JIT-warm compiler
  * ([[IsolatedCheck.Session]], one per compiler version) and a fresh compiler context.
  */

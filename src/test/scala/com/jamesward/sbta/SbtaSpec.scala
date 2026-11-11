@@ -392,6 +392,8 @@ object SbtaSpec extends ZIOSpecDefault:
       )
     },
     updatesSuite,
+    skillsSuite,
+    tasksSuite,
     test("a project of another build (RootProject/ProjectRef) is referred to with its build") {
       val ps = List(
         (true, "file:/b/root/", "root"),
@@ -406,6 +408,92 @@ object SbtaSpec extends ZIOSpecDefault:
         SbtTools.projectRef("zio-bedrock", ps) == "{file:/b/zio-bedrock/}zio-bedrock",
         SbtTools.projectRef("dup", ps) == "dup", // ambiguous: left for sbt to report
         SbtTools.projectRef("nope", ps) == "nope",
+      )
+    },
+  )
+
+  // ---- skills ----
+
+  private def tasksSuite = suite("tasks")(
+    test("a session reports the command it runs and its latest output line to the call's activity") {
+      withBuild { dir =>
+        val (socket, _) = fakeSbt(dir)
+        val activity    = Activity()
+        val before      = activity.status
+        Activity.during(activity) {
+          val s = session(dir, socket)
+          try s.exec("compile")
+          finally s.close()
+        }
+        assertTrue(
+          before == "sbt (0s)",
+          activity.status == "`compile` (0s): red",
+          Activity.current.isEmpty,
+          Activity.format(125.seconds) == "2m 5s",
+        )
+      }
+    },
+    test("MCP: an sbt command still running after the grace period is answered as a task whose status is its command and output; a quick one directly") {
+      import com.jamesward.ziohttp.mcp.*
+      import com.jamesward.ziohttp.mcp.client.*
+      import zio.http.{ Client, Server }
+      val result =
+        """{"command":"compile","success":true,"elapsedMs":1,"errorCount":0,"warningCount":0,"problems":[],"log":"","logTruncated":false}"""
+      // As SbtTools.run: what the call's sessions would report, and the slow project takes a while.
+      val run: BuildTools.Run = (_, args) =>
+        val slow = args.contains("project")
+        Activity.current.foreach(_.running(if slow then "slow / compile" else "compile"))
+        Activity.current.foreach(_.output("[info] compiling 3 Scala sources\n"))
+        if slow then Thread.sleep(2000)
+        result
+      ZIO.scoped {
+        for
+          tasks   <- McpTasks.inMemory
+          tools    = BuildTools.all(run, reportEvery = 100.millis).map(BuildTools.asTask(_, after = 600.millis))
+          server   = tools.foldLeft(McpServer("sbta-test", "0").withExtensions(tasks))(_.tool(_))
+          port    <- Server.install(server.routes)
+          client  <- McpClient.connect(McpClientConfig(s"http://localhost:$port/mcp"))
+          quick   <- client.startTool("compile", Json.Obj())
+          slow    <- client.startTool("compile", Json.Obj("project" -> Json.Str("slow")))
+          task     = slow match
+                       case ToolCallOutcome.Started(t) => Some(t)
+                       case ToolCallOutcome.Completed(_) => None
+          awaited <- ZIO.foreach(task)(t => client.awaitTask(t.taskId))
+        yield
+          val quickResult = quick match
+            case ToolCallOutcome.Completed(r) => r.structuredContent
+            case ToolCallOutcome.Started(_)   => None
+          assertTrue(
+            quickResult.flatMap(_.asObject).flatMap(_.get("success")).contains(Json.Bool(true)),
+            task.flatMap(_.statusMessage).exists(m => m.startsWith("`slow / compile` (") && m.endsWith("): [info] compiling 3 Scala sources")),
+            awaited.flatMap(_.structuredContent).flatMap(_.asObject).flatMap(_.get("success")).contains(Json.Bool(true)),
+            tools.forall(_.taskPolicy.execution == TaskExecution.WhenSlow(600.millis)),
+            // Polled every second at first (BuildTools.PollSchedule), backing off from there.
+            task.flatMap(_.pollIntervalMs).contains(1000L),
+            tools.forall(_.taskPolicy.pollSchedule.isDefined),
+          )
+      }.provide(Server.defaultWith(_.onAnyOpenPort), Client.default, McpServer.State.default)
+    } @@ TestAspect.withLiveClock,
+  )
+
+  private def skillsSuite = suite("skills")(
+    test("the bridge's answers: a value, a missing key, a failure") {
+      assertTrue(
+        SbtBridge.reply("""{"value":["/c/skills-0.0.22.jar"]}""").map(_.toJson) == Right("""["/c/skills-0.0.22.jar"]"""),
+        SbtBridge.reply("""{"value":null}""").map(_.toJson) == Right("null"),
+        SbtBridge.reply("""{"noSuchKey":"Not a valid key: skillsJarsFiles"}""") == Left(BridgeError.NoSuchKey("Not a valid key: skillsJarsFiles")),
+        SbtBridge.reply("""{"error":"boom"}""") == Left(BridgeError.Failed("boom")),
+        SbtBridge.reply("not json").isLeft,
+      )
+    },
+    test("the instructions point a client that declared the Skills extension at MCP, and any other at extractSkillsJars") {
+      import com.jamesward.ziohttp.mcp.*
+      val declared = McpRequestContext(ProtocolVersion.default, capabilities = Map(McpSkills.Id -> Json.Obj()))
+      val plain    = McpRequestContext(ProtocolVersion.default)
+      assertTrue(
+        BuildSkills.instructions(declared).contains("MCP Skills extension"),
+        !BuildSkills.instructions(declared).contains("extractSkillsJars"),
+        BuildSkills.instructions(plain).contains("extractSkillsJars"),
       )
     },
   )

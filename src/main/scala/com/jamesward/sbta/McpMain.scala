@@ -107,25 +107,39 @@ object McpMain:
     val server = SbtServer(base, start, log)
     val tools  = SbtTools(server, log)
     val code   = CodeTools(server, log)
+    val skills = BuildSkills(server, log)
 
     if start == StartMode.Eager then
       val booting = Thread(() => { try server.ensureRunning() catch case NonFatal(e) => log(s"starting sbt failed: ${e.getMessage}"); () })
       booting.setDaemon(true)
       booting.start()
 
+    val runtime = Unsafe.unsafe(implicit u => Runtime.unsafe.fromLayer(Runtime.removeDefaultLoggers))
+    // MCP tasks (io.modelcontextprotocol/tasks), in this process: a client that handles them
+    // follows a slow sbt command in the background. They end with this process.
+    val tasks = Unsafe.unsafe(implicit u => runtime.unsafe.run(McpTasks.inMemory).getOrThrowFiberFailure())
+    val extensions = (skills.extensions ++ tasks).fold(
+      error => { log(s"MCP tasks are off: $error"); skills.extensions },
+      identity,
+    )
+
     val mcp: McpServer[Client] =
       val updates = UpdateNotes(base, resultNotes, log, buildNote = () => server.brokenBuildNote)
       val core = McpServer("sbta", SbtaBuildInfo.version)
-        .instructions(InstructionsSource(_ => ZIO.succeed(Some(Instructions + updates.instructionsNote.fold("")(" " + _)))))
+        .instructions(InstructionsSource(ctx =>
+          ZIO.succeed(Some(Instructions + " " + BuildSkills.instructions(ctx) + updates.instructionsNote.fold("")(" " + _)))
+        ))
+        .withExtensions(extensions)
+        .resourceSource(skills.resources)
+      // The tools that run sbt commands, which can take minutes: a slow call becomes an MCP task.
+      val sbtCommands = (List(sbtTaskTool(tools), listTasksTool(tools)) ++ BuildTools.all(tools.run)).map(BuildTools.asTask(_))
       val handlers =
-        List(sbtTaskTool(tools), listTasksTool(tools), globSearchTool(code), inspectTool(code), locationTool(code), checkTool(code)) ++
-          BuildTools.all(tools.run) :+ updateTool(updates)
+        sbtCommands ++ List(globSearchTool(code), inspectTool(code), locationTool(code), checkTool(code), updateTool(updates))
       val withBuildTools = handlers.map(updates.withNote).foldLeft(core)(_.tool(_))
       docsUrl match
         case Some(url) => withBuildTools.toolSource(updates.withNote(ProxyToolSource(url, log)))
         case None      => withBuildTools
 
-    val runtime = Unsafe.unsafe(implicit u => Runtime.unsafe.fromLayer(Runtime.removeDefaultLoggers))
     Unsafe.unsafe { implicit u =>
       runtime.unsafe.run(mcp.serveStdio.provide(Client.default)).getOrThrowFiberFailure()
     }
@@ -146,6 +160,8 @@ object McpMain:
       "Search/inspect Scala 3 symbols read from TASTy (`glob-search`, `inspect`, `symbol-location`), and `check` " +
       "Scala 3 sources quickly without compiling. Commands run on sbt's command loop " +
       "one at a time (shared with any other sbt client); cancelling a call cancels its command. " +
+      "For a client that supports MCP tasks, an sbt command still running after 10 s continues as a task, " +
+      "whose status shows the command and its latest output. " +
       "Documentation tools are proxied from javadocs.dev. `update-sbta` updates the build's sbta scripts."
 
   /**
@@ -313,8 +329,8 @@ object McpMain:
           "e.g. `reload`, `set …`, `scalafmtAll`, or chains like `clean; compile`."
       )
       .annotations(destructive = OptBool.True, openWorld = OptBool.True)
-      .handle[Any, Throwable, SbtTaskArgs, String] { (args: SbtTaskArgs) =>
-        ZIO.attemptBlockingInterrupt(tools.sbtTask(args.command))
+      .handleWithContext[Any, Throwable, SbtTaskArgs, String] { (args: SbtTaskArgs, ctx: McpToolContext) =>
+        Activity.reporting(ctx, BuildTools.ReportEvery)(tools.sbtTask(args.command))
       }
 
   private def listTasksTool(tools: SbtTools): McpToolHandler =
@@ -324,8 +340,8 @@ object McpMain:
           "`task`, the detailed help for one task (`help <task>`)."
       )
       .annotations(readOnly = OptBool.True)
-      .handle[Any, Throwable, ListTasksArgs, String] { (args: ListTasksArgs) =>
-        ZIO.attemptBlockingInterrupt(tools.listTasks(args.all.contains(true), args.task))
+      .handleWithContext[Any, Throwable, ListTasksArgs, String] { (args: ListTasksArgs, ctx: McpToolContext) =>
+        Activity.reporting(ctx, BuildTools.ReportEvery)(tools.listTasks(args.all.contains(true), args.task))
       }
 
   /**

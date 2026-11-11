@@ -326,6 +326,8 @@ final case class ExecResult(
 final class Session private (server: SbtServer, log: String => Unit) extends AutoCloseable:
 
   @volatile private var connection: SbtConnection = null
+  /** The activity of the tool call that opened this session (on its thread), to report what it runs. */
+  private val activity = Activity.current
   /** Completed when sbt closes this channel to reboot (see [[Session.rebootOf]]). */
   @volatile private var rebooting = CompletableFuture[(String, String)]()
   /** The server JVMs when sbt said it was rebooting: it reboots in the same JVM, which exits if that fails. */
@@ -422,8 +424,18 @@ final class Session private (server: SbtServer, log: String => Unit) extends Aut
   private val clientJobs   = scala.collection.mutable.ListBuffer[ClientJob]()
   private var bspReady     = false
   @volatile var onQueued: String => Unit = _ => ()
+  /** [[SbtBridge]]'s answers, by the id of the `sbtaEval` that asked. */
+  private val bridgeResults = java.util.concurrent.ConcurrentHashMap[String, String]()
+
+  /** The bridge's answer to `sbtaEval <id> …`, once (sbt sends it before the command's response). */
+  private[sbta] def takeBridgeResult(id: String): Option[String] = Option(bridgeResults.remove(id))
 
   private[sbta] def handle(method: String, params: Json): Unit = method match
+    case SbtBridge.ResultMethod =>
+      val fields = params.asObject.map(_.fields.toMap).getOrElse(Map.empty)
+      (fields.get("id"), fields.get("result")) match
+        case (Some(Json.Str(id)), Some(Json.Str(result))) => bridgeResults.put(id, result); ()
+        case _                                            => log(s"ignoring a malformed ${SbtBridge.ResultMethod}: ${params.toJson.take(200)}")
     case "sbt/systemOut" | "sbt/systemErr" =>
       params match
         case Json.Arr(bytes) =>
@@ -473,6 +485,7 @@ final class Session private (server: SbtServer, log: String => Unit) extends Aut
     while quietFor < 100_000_000L && System.nanoTime() < deadline do Thread.sleep(20)
 
   private def append(text: String): Unit = synchronized {
+    activity.foreach(_.output(text))
     lastOutputAt = System.nanoTime()
     output.append(text)
     if output.length > MaxOutput then
@@ -536,6 +549,7 @@ final class Session private (server: SbtServer, log: String => Unit) extends Aut
     val fingerprint  = server.buildFingerprint()
     val activeBefore = server.activeStamp()
     reset()
+    activity.foreach(_.running(commandLine))
     val started      = System.nanoTime()
     val (id, future) = connection.request("sbt/exec", Json.Obj("commandLine" -> Json.Str(commandLine)))
     var rebooted     = Option.empty[Session.Rebooted]

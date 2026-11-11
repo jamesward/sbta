@@ -101,6 +101,27 @@ Plus the [javadocs.dev](https://www.javadocs.dev/mcp) tools, proxied. Commands r
 sbt's command loop one at a time, shared with any other sbt client; cancelling a call
 cancels its command.
 
+For a client that supports MCP tasks (`io.modelcontextprotocol/tasks` on protocol
+2026-07-28, such as the Claude Code CLI), a tool that runs an sbt command and is still
+running after 10 seconds continues as a task: the client follows it in the background
+while the agent keeps working (`check` doesn't wait for sbt), and its status shows the
+command, the elapsed time and the latest output line. The client is asked to poll it
+every second at first, then 20% less often each poll, up to every 30 seconds. Stopping the task cancels the
+sbt command. Quicker calls, and every call from other clients, are answered as before.
+Tasks live in the `./sbta --mcp` process, so they end when the client stops it.
+
+### Skills
+
+The agent skills a build declares with
+[sbt-skillsjars](https://github.com/skillsjars/skillsjars-sbt-plugin) 0.1.0 or later
+(`% Skills` dependencies, or whatever each project's `skillsJarsConfigurations` scans,
+in every project of every build) are served through the
+[MCP Skills extension](https://modelcontextprotocol.io/extensions/skills/overview), one
+SkillsJar per module at its highest revision. SkillsJars that are only on a program's
+classpath aren't served. The server's instructions tell a client that declared the
+extension that the skills come over MCP, and any other client to extract them with
+`extractSkillsJars <dir>`.
+
 Options: `--project-dir=<dir>`, `--start=eager|lazy|never` (start sbt right away, on
 the first call that needs it, or never), `--docs-url=<url>|none`, `--setup <clients>`,
 `--no-update-notice`. Logs:

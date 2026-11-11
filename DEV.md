@@ -134,6 +134,16 @@ these engines started.
   JSON writer for `Seq`, so `show` falls back to `show <key>`'s log).
 - **run on sbt 2** answers with `sbt/clientJob` (classpath, JVM, options): sbta starts
   that JVM itself, stdin closed, and kills it on cancel. sbt 1 runs it in-process.
+- **MCP tasks.** The tools that run sbt commands (`sbt-task`, `list-tasks` and the
+  structured tools) have zio-http-mcp's `TaskExecution.WhenSlow(10 s)`
+  (`BuildTools.asTask`): for a client that declared the Tasks extension, a call still
+  running then is answered with a task (in memory, `McpTasks.inMemory`; the suggested
+  poll interval follows `BuildTools.PollSchedule`, 1 s growing by 20% a poll to 30 s), and
+  `tasks/cancel` interrupts it as a cancelled call would (`sbt/cancelRequest`). Each
+  call runs with an `Activity`, set on the thread doing its work, which the call's
+  `Session`s update with the command line and the last output line; every 5 s it's
+  reported as progress, which is the task's `statusMessage` (and
+  `notifications/progress` for a plain call that sent a `progressToken`).
 - **`dependencies`** runs `<project> / update`, then reads the `UpdateReport` sbt
   caches as JSON (`update/update_cache_<n>/output` under the project's `target`,
   from `sbt/setting`); declared modules from `sbt/setting libraryDependencies`
@@ -155,6 +165,29 @@ these engines started.
   `<q> / name` block for each project `q` that `p` aggregates (transitively); direct
   aggregates are the ones not reached through another. One command per root-build
   project, cached until the build definition changes.
+- **Skills** (`BuildSkills`) are served through the MCP Skills extension (`skills/list`,
+  `skills/get`, `resources/directory/read`, and `resources/read` for the files), with
+  zio-http-mcp's `McpSkillsJars.load(paths)` over exactly the jars of sbt-skillsjars'
+  `skillsJarsFiles` (every project's `skillsJarsConfigurations`, one jar per module at
+  its highest revision), read through the bridge, so a SkillsJar only on a program's
+  classpath isn't served. Read on first use and again when `buildFingerprint` changes;
+  a build without the task (no sbt-skillsjars, or one before 0.1.0) has none. The
+  instructions depend on what the client declared: the Skills extension, or else run
+  `extractSkillsJars`.
+- **The bridge** (`SbtBridge`, `sbt-bridge/`) gives values from the running server as
+  data, without a plugin: sbta loads it with sbt's own `apply -cp <jar>
+  sbt.sbtabridge.SbtaBridge`, which adds `sbtaEval <id> <key>`. That reads a setting or
+  runs a task (resolving the key as sbt's shell does) and answers sbta's channel only,
+  with a `sbta/result` notification holding the value as JSON (sbt's own JSON for an
+  update report; collections, options, strings, numbers and files as themselves). A
+  server without it (new or restarted; it stays through `reload`) gets it when sbt
+  reports `sbtaEval` as not a valid command, and the call is retried. The bridge is
+  compiled twice from `sbt-bridge/shared`: for sbt 1 against sbt 1.4.9 (Scala 2.12) and
+  for sbt 2 against sbt 2.0.0 (Scala 3.8.4), the oldest of each line, and embedded as
+  `sbta-bridge/sbt1.jar` and `sbt2.jar` (written to `project/target/sbta/bridge/`). It's
+  in package `sbt` for sbt's server internals (`StandardMain.exchange`,
+  `NetworkChannel.jsonRpcNotify`), which an sbt release can change: the launcher specs
+  run it on sbt 1.12.15 and 2.0.12.
 - **Not covered yet:** Windows named pipes (`--mcp`).
 - **Updates** (`Updates`). The release scripts pin their version (`sbta_version`). The
   check: GitHub's releases API, newest semver release (no drafts, pre-releases or

@@ -9,9 +9,8 @@ import scala.util.control.NonFatal
 /**
  * Process-global holder for the classpath entries the MCP symbol tools read.
  *
- * The plugin's automatic refresh (`SbtMcpPlugin.refreshFromState`, run on the sbt
- * command loop where `fullClasspathAsJars` is available) pushes entries + a content
- * fingerprint and target Scala version here before each symbol query; MCP handlers
+ * [[CodeTools]] pushes entries (the build's classpaths from BSP), a content
+ * fingerprint and the target Scala version here before each symbol query; MCP handlers
  * then invoke a lazily-built, cached isolated reader session through a JDK-only
  * reflective bridge. This decouples symbol queries from sbt's task engine and Scala
  * runtime while remaining in-process.

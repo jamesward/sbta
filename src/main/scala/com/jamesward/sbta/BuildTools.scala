@@ -14,11 +14,12 @@ import zio.schema.codec.json.schemaJson
 
 /**
  * The structured build tools: hand-written MCP tools with typed input and output
- * schemas for the build operations agents use most. The work is done in the sbt
- * plugin (`McpBuildTools`), reached through the string-only `buildTool` callback:
- * arguments cross as string lists, results come back as a JSON object (or an error
- * message, which never starts with `{`). Each result is decoded into its output case
- * class here, so `structuredContent` always matches the advertised `outputSchema`.
+ * schemas for the build operations agents use most. The work is done by
+ * [[SbtTools]], as a client of the build's sbt server, reached through the
+ * string-only `buildTool` callback: arguments cross as string lists, results come
+ * back as a JSON object (or an error message, which never starts with `{`). Each
+ * result is decoded into its output case class here, so `structuredContent` always
+ * matches the advertised `outputSchema`.
  */
 object BuildTools:
 
@@ -237,126 +238,133 @@ object BuildTools:
   final case class ShowResult(
       @description("The resolved key, relative to the current project.") key: String,
       @description("`setting` or `task`.") kind: String,
-      @description("The value's runtime class (type arguments are erased).") valueType: String,
-      @description("The value's `toString` (at most 20000 characters).") value: String,
-      @description("The value as JSON when it is made of collections, options, strings, numbers, booleans and files.")
+      @description("A setting's type as sbt reports it; `unknown` for a task.") valueType: String,
+      @description("The value as text (at most 20000 characters): a setting's JSON or string, a task's `show` output.") value: String,
+      @description("A setting's value as JSON, when sbt can write its type as JSON. Never set for a task.")
       json: Option[Json],
   )
   object ShowResult { given Schema[ShowResult] = DeriveSchema.gen[ShowResult] }
 
   // ---- tools ----
 
-  def all(run: Run): List[McpToolHandler] = List(
-    tool[CompileArgs, ActionResult](
-      McpTool("compile")
-        .description(
-          "Compile a project (and what it aggregates) and return the compiler's errors and warnings as data " +
-            "(file, line, column, message), plus status, timing and the captured log. Incremental: only changed " +
-            "sources are recompiled, so warnings from unchanged files are not reported again. Runs on sbt's command " +
-            "loop, after any running command."
-        )
-        .annotations(readOnly = OptBool.False, destructive = OptBool.False, idempotent = OptBool.True, openWorld = OptBool.False),
-      run,
-      "compile",
-    )(a => opt("project", a.project) ++ opt("configuration", a.configuration.map(_.toString))),
-    tool[TestArgs, TestResult](
-      McpTool("test")
-        .description(
-          "Run tests and return the results as data: pass/fail counts, each failed test's suite, name and " +
-            "message, compiler diagnostics if the tests didn't compile, and the captured log. Without arguments " +
-            "it runs sbt 2's incremental `test` (only failed, new or affected tests); set `full` to run all, or " +
-            "`tests` to run specific classes."
-        )
-        .annotations(readOnly = OptBool.False, destructive = OptBool.False, idempotent = OptBool.False, openWorld = OptBool.True),
-      run,
-      "test",
-    )(a =>
-      opt("project", a.project) ++ list("tests", a.tests) ++ opt("full", a.full.map(_.toString)) ++
-        list("frameworkArgs", a.frameworkArgs)
-    ),
-    tool[RunArgs, ActionResult](
-      McpTool("run")
-        .description(
-          "Run a project's main class in a forked JVM with program arguments, and return the program's " +
-            "output (stdout and stderr), status, compiler diagnostics and the captured log. Uses the project's " +
-            "`run` settings (main class, classpath, javaOptions, envVars, working directory), with stdin " +
-            "disconnected. It blocks sbt until the program exits, so don't use it for servers."
-        )
-        .annotations(readOnly = OptBool.False, destructive = OptBool.True, idempotent = OptBool.False, openWorld = OptBool.True),
-      run,
-      "run",
-    )(a => opt("project", a.project) ++ opt("mainClass", a.mainClass) ++ a.args.map(v => "args" -> v).toMap),
-    tool[ProjectArgs, ActionResult](
-      McpTool("clean")
-        .description("Delete a project's build outputs (and those of the projects it aggregates), forcing a full recompile next time.")
-        .annotations(readOnly = OptBool.False, destructive = OptBool.True, idempotent = OptBool.True, openWorld = OptBool.False),
-      run,
-      "clean",
-    )(a => opt("project", a.project)),
-    tool[ProjectArgs, PublishLocalResult](
-      McpTool("publish-local")
-        .description(
-          "Publish a project (and what it aggregates) to the local Ivy repository, so other local builds can " +
-            "depend on it. Returns the published modules' coordinates, plus status, diagnostics and the log."
-        )
-        .annotations(readOnly = OptBool.False, destructive = OptBool.True, idempotent = OptBool.True, openWorld = OptBool.False),
-      run,
-      "publish-local",
-    )(a => opt("project", a.project)),
-    noArgTool[ProjectsResult](
-      McpTool("projects")
-        .description(
-          "List the build's projects: id, base directory, name/organization/version, Scala version, which " +
-            "project is current, and how they aggregate and depend on each other. Reads the loaded build only " +
-            "(nothing runs), and answers even while sbt is busy."
-        )
-        .annotations(readOnly = OptBool.True, idempotent = OptBool.True, openWorld = OptBool.False),
-      run,
-      "projects",
-    ),
-    tool[ProjectArgs, TestNamesResult](
-      McpTool("test-names")
-        .description(
-          "List the test classes defined in a project (and the projects it aggregates), for use with the `test` " +
-            "tool's `tests`. Compiles the test sources first if needed."
-        )
-        .annotations(readOnly = OptBool.True, idempotent = OptBool.True, openWorld = OptBool.False),
-      run,
-      "test-names",
-    )(a => opt("project", a.project)),
-    tool[ProjectArgs, MainClassesResult](
-      McpTool("main-classes")
-        .description(
-          "List the main classes of a project (and the projects it aggregates) and the one `run` would use, for " +
-            "the `run` tool's `mainClass`. Compiles the main sources first if needed."
-        )
-        .annotations(readOnly = OptBool.True, idempotent = OptBool.True, openWorld = OptBool.False),
-      run,
-      "main-classes",
-    )(a => opt("project", a.project)),
-    tool[DependenciesArgs, DependenciesResult](
-      McpTool("dependencies")
-        .description(
-          "Report a project's library dependencies: as declared (`libraryDependencies`), as resolved for a " +
-            "configuration's classpath (with direct/transitive), and the versions evicted by conflicts. " +
-            "Resolves dependencies first if needed (may download)."
-        )
-        .annotations(readOnly = OptBool.True, idempotent = OptBool.True, openWorld = OptBool.True),
-      run,
-      "dependencies",
-    )(a => opt("project", a.project) ++ opt("configuration", a.configuration.map(_.toString))),
-    tool[ShowArgs, ShowResult](
-      McpTool("show")
-        .description(
-          "Return the value of an sbt setting, or run a task and return its result, as text and (for collections, " +
-            "options, strings, numbers and files) as JSON. Like sbt's `show`, but for exactly the resolved key: it " +
-            "does not aggregate. Running a task runs its side effects. Input tasks (that take arguments) need `sbt-task`."
-        )
-        .annotations(readOnly = OptBool.False, destructive = OptBool.True, idempotent = OptBool.False, openWorld = OptBool.True),
-      run,
-      "show",
-    )(a => Map("key" -> List(a.key))),
-  )
+  def all(run: Run, reportEvery: Duration = ReportEvery): List[McpToolHandler] =
+    def tool[In: McpInput, Out: Schema](definition: McpTool, run: Run, name: String)(toArgs: In => Map[String, List[String]]) =
+      BuildTools.tool[In, Out](definition, run, name, reportEvery)(toArgs)
+    def noArgTool[Out: Schema](definition: McpTool, run: Run, name: String) =
+      BuildTools.noArgTool[Out](definition, run, name, reportEvery)
+    List(
+      tool[CompileArgs, ActionResult](
+        McpTool("compile")
+          .description(
+            "Compile a project (and what it aggregates) and return the compiler's errors and warnings as data " +
+              "(file, line, column, message), plus status, timing and the captured log. Incremental: only changed " +
+              "sources are recompiled, so warnings from unchanged files are not reported again. Runs on sbt's command " +
+              "loop, after any running command."
+          )
+          .annotations(readOnly = OptBool.False, destructive = OptBool.False, idempotent = OptBool.True, openWorld = OptBool.False),
+        run,
+        "compile",
+      )(a => opt("project", a.project) ++ opt("configuration", a.configuration.map(_.toString))),
+      tool[TestArgs, TestResult](
+        McpTool("test")
+          .description(
+            "Run tests and return the results as data: pass/fail counts, each failed test's suite, name and " +
+              "message, compiler diagnostics if the tests didn't compile, and the captured log. Without arguments " +
+              "it runs sbt 2's incremental `test` (only failed, new or affected tests); set `full` to run all, or " +
+              "`tests` to run specific classes."
+          )
+          .annotations(readOnly = OptBool.False, destructive = OptBool.False, idempotent = OptBool.False, openWorld = OptBool.True),
+        run,
+        "test",
+      )(a =>
+        opt("project", a.project) ++ list("tests", a.tests) ++ opt("full", a.full.map(_.toString)) ++
+          list("frameworkArgs", a.frameworkArgs)
+      ),
+      tool[RunArgs, ActionResult](
+        McpTool("run")
+          .description(
+            "Run a project's main class in a forked JVM with program arguments, and return the program's " +
+              "output (stdout and stderr), status, compiler diagnostics and the captured log. Uses the project's " +
+              "`run` settings (main class, classpath, javaOptions, envVars, working directory), with stdin " +
+              "disconnected. It blocks sbt until the program exits, so don't use it for servers."
+          )
+          .annotations(readOnly = OptBool.False, destructive = OptBool.True, idempotent = OptBool.False, openWorld = OptBool.True),
+        run,
+        "run",
+      )(a => opt("project", a.project) ++ opt("mainClass", a.mainClass) ++ a.args.map(v => "args" -> v).toMap),
+      tool[ProjectArgs, ActionResult](
+        McpTool("clean")
+          .description("Delete a project's build outputs (and those of the projects it aggregates), forcing a full recompile next time.")
+          .annotations(readOnly = OptBool.False, destructive = OptBool.True, idempotent = OptBool.True, openWorld = OptBool.False),
+        run,
+        "clean",
+      )(a => opt("project", a.project)),
+      tool[ProjectArgs, PublishLocalResult](
+        McpTool("publish-local")
+          .description(
+            "Publish a project (and what it aggregates) to the local Ivy repository, so other local builds can " +
+              "depend on it. Returns the published modules' coordinates, plus status, diagnostics and the log."
+          )
+          .annotations(readOnly = OptBool.False, destructive = OptBool.True, idempotent = OptBool.True, openWorld = OptBool.False),
+        run,
+        "publish-local",
+      )(a => opt("project", a.project)),
+      noArgTool[ProjectsResult](
+        McpTool("projects")
+          .description(
+            "List the build's projects: id, base directory, name/organization/version, Scala version, which " +
+              "project is current, and how they aggregate and depend on each other. Reads the loaded build only " +
+              "(nothing runs), and answers even while sbt is busy."
+          )
+          .annotations(readOnly = OptBool.True, idempotent = OptBool.True, openWorld = OptBool.False),
+        run,
+        "projects",
+      ),
+      tool[ProjectArgs, TestNamesResult](
+        McpTool("test-names")
+          .description(
+            "List the test classes defined in a project (and the projects it aggregates), for use with the `test` " +
+              "tool's `tests`. Compiles the test sources first if needed."
+          )
+          .annotations(readOnly = OptBool.True, idempotent = OptBool.True, openWorld = OptBool.False),
+        run,
+        "test-names",
+      )(a => opt("project", a.project)),
+      tool[ProjectArgs, MainClassesResult](
+        McpTool("main-classes")
+          .description(
+            "List the main classes of a project (and the projects it aggregates) and the one `run` would use, for " +
+              "the `run` tool's `mainClass`. Compiles the main sources first if needed."
+          )
+          .annotations(readOnly = OptBool.True, idempotent = OptBool.True, openWorld = OptBool.False),
+        run,
+        "main-classes",
+      )(a => opt("project", a.project)),
+      tool[DependenciesArgs, DependenciesResult](
+        McpTool("dependencies")
+          .description(
+            "Report a project's library dependencies: as declared (`libraryDependencies`), as resolved for a " +
+              "configuration's classpath (with direct/transitive), and the versions evicted by conflicts. " +
+              "Resolves dependencies first if needed (may download)."
+          )
+          .annotations(readOnly = OptBool.True, idempotent = OptBool.True, openWorld = OptBool.True),
+        run,
+        "dependencies",
+      )(a => opt("project", a.project) ++ opt("configuration", a.configuration.map(_.toString))),
+      tool[ShowArgs, ShowResult](
+        McpTool("show")
+          .description(
+            "Return the value of an sbt setting, or run a task and return its result. A setting is read without " +
+              "running anything, as JSON when sbt can write its type as JSON, and only for exactly the resolved key. " +
+              "A task (or a setting sbt can't write as JSON) runs as sbt's `show <key>`: its result is that command's " +
+              "printed output, as text only, and an aggregating project also prints the projects it aggregates. " +
+              "Running a task runs its side effects. Input tasks (that take arguments) need `sbt-task`."
+          )
+          .annotations(readOnly = OptBool.False, destructive = OptBool.True, idempotent = OptBool.False, openWorld = OptBool.True),
+        run,
+        "show",
+      )(a => Map("key" -> List(a.key))),
+    )
 
   private def opt(name: String, value: Option[String]): Map[String, List[String]] =
     value.map(v => name -> List(v)).toMap
@@ -364,13 +372,43 @@ object BuildTools:
   private def list(name: String, value: Option[List[String]]): Map[String, List[String]] =
     value.map(v => name -> v).toMap
 
-  private def tool[In: McpInput, Out: Schema](definition: McpTool, run: Run, name: String)(
+  /** A call still running after this continues as an MCP task, for a client that handles tasks. */
+  val TaskAfter: Duration = 10.seconds
+
+  /** How often a running call reports what sbt is doing (a task's `statusMessage`). */
+  val ReportEvery: Duration = 5.seconds
+
+  /**
+   * How often a client is asked to poll a task: every second at first, then 20% less
+   * often each poll, up to every 30 s, so a long `testFull` isn't polled every second.
+   */
+  val PollSchedule: Schedule[Any, Any, Any] = Schedule.exponential(1.second, 1.2) || Schedule.spaced(30.seconds)
+
+  /**
+   * `tool`, answered as an MCP task once it has run for `after`, for a client that
+   * declared the Tasks extension: the client follows it in the background, and the
+   * agent goes on meanwhile. A quicker call, and every call of other clients, is
+   * answered as before.
+   */
+  def asTask[R](tool: McpToolHandlerR[R], after: Duration = TaskAfter): McpToolHandlerR[R] =
+    val policy = TaskPolicy(TaskExecution.WhenSlow(after), pollInterval = 1.second, pollSchedule = Some(PollSchedule))
+    new McpToolHandlerR[R]:
+      def name: ToolName                = tool.name
+      def definition: ToolDefinition    = tool.definition
+      override def requiredScopes       = tool.requiredScopes
+      override def taskPolicy           = policy
+      def call(args: Option[Json.Obj])  = tool.call(args)
+      override def callWithContext(args: Option[Json.Obj], ctx: McpToolContext) = tool.callWithContext(args, ctx)
+
+  private def tool[In: McpInput, Out: Schema](definition: McpTool, run: Run, name: String, reportEvery: Duration)(
       toArgs: In => Map[String, List[String]]
   ): McpToolHandler =
-    definition.handle[Any, String, In, Validated[Out]] { (in: In) => call[Out](run, name, toArgs(in)) }
+    definition.handleWithContext[Any, String, In, Validated[Out]] { (in: In, ctx: McpToolContext) =>
+      call[Out](run, name, toArgs(in), ctx, reportEvery)
+    }
 
-  private def noArgTool[Out: Schema](definition: McpTool, run: Run, name: String): McpToolHandler =
-    definition.handle[Any, String, Validated[Out]](call[Out](run, name, Map.empty))
+  private def noArgTool[Out: Schema](definition: McpTool, run: Run, name: String, reportEvery: Duration): McpToolHandler =
+    definition.handleWithContext[Any, String, Validated[Out]]((ctx: McpToolContext) => call[Out](run, name, Map.empty, ctx, reportEvery))
 
   /**
    * A result object decoded into `Out` and re-encoded, so it has exactly the fields of
@@ -390,12 +428,11 @@ object BuildTools:
     case Json.Arr(items)  => Json.Arr(items.map(dropNulls))
     case other            => other
 
-  private def call[Out](run: Run, name: String, args: Map[String, List[String]])(using
+  private def call[Out](run: Run, name: String, args: Map[String, List[String]], ctx: McpToolContext, reportEvery: Duration)(using
       schema: Schema[Out]
   ): IO[String, Validated[Out]] =
-    ZIO
-      // Interruptible: a cancelled call (`notifications/cancelled`) interrupts the waiting thread.
-      .attemptBlockingInterrupt(run(name, args))
+    // Interruptible: a cancelled call (`notifications/cancelled`) or task interrupts the waiting thread.
+    Activity.reporting(ctx, reportEvery)(run(name, args))
       .mapError(e => s"$name: ${Option(e.getMessage).getOrElse(e.toString)}")
       .flatMap { text =>
         if text.startsWith("{") then

@@ -63,9 +63,13 @@ object LauncherSpec extends ZIOSpecDefault:
         |lazy val leaf = project
         |lazy val app  = project.dependsOn(leaf)
         |lazy val mid  = project.aggregate(leaf)
+        |// sbt-skillsjars' task, without the plugin: the build's SkillsJars, as files.
+        |lazy val skillsJarsFiles = taskKey[Seq[String]]("SkillsJars")
         |lazy val root = (project in file(".")).aggregate(mid, app)
+        |  .settings(skillsJarsFiles := Seq((baseDirectory.value / "skills.jar").getAbsolutePath))
         |""".stripMargin,
     )
+    writeSkillsJar(dir.resolve("skills.jar"))
     Files.createDirectories(dir.resolve("leaf/src/main/scala"))
     Files.writeString(dir.resolve("leaf/src/main/scala/Leaf.scala"), "package leaf\nobject Leaf { def x = 1 }\n")
     Files.createDirectories(dir.resolve("app/src/main/scala"))
@@ -74,6 +78,14 @@ object LauncherSpec extends ZIOSpecDefault:
     Files.copy(scripts.resolve("sbta.bat"), dir.resolve("sbta.bat"))
     dir.resolve("sbta").toFile.setExecutable(true)
     dir
+
+  /** A SkillsJar with one skill, `skill://spec/fixture/SKILL.md`. */
+  private def writeSkillsJar(jar: Path): Unit =
+    scala.util.Using.resource(java.util.jar.JarOutputStream(Files.newOutputStream(jar))) { out =>
+      out.putNextEntry(java.util.jar.JarEntry("META-INF/skills/spec/fixture/SKILL.md"))
+      out.write("---\nname: fixture\ndescription: A skill for the launcher specs.\n---\n# Fixture\n".getBytes(StandardCharsets.UTF_8))
+      out.closeEntry()
+    }
 
   /** A directory laid out like the GitHub releases (`v<version>/sbta-<version>.jar`), for the script to download from. */
   private lazy val repo: Path =
@@ -192,6 +204,7 @@ object LauncherSpec extends ZIOSpecDefault:
         assertTrue(sbtaAnswered)
       },
       everyTool(dir),
+      skillsThroughTheBridge(dir),
       reloadThroughSbtTask(dir),
       failedReloadThroughSbtTask(sbtVersion),
       rebootThroughSbtTask(sbtVersion),
@@ -277,6 +290,37 @@ object LauncherSpec extends ZIOSpecDefault:
             text("run").contains("hello 1 x"),
             text("glob-search").contains("leaf.Leaf"),
           )
+      }
+    } @@ TestAspect.ifProp("os.name")(!_.toLowerCase.contains("win"))
+
+  /**
+   * The build's skills over MCP's Skills extension, read through the bridge sbta loads
+   * into the server (`apply`), for a client that declared the extension.
+   */
+  private def skillsThroughTheBridge(dir: Path) =
+    test("skills: the bridge reads the build's skillsJarsFiles, and the skills are served over the Skills extension") {
+      ZIO.attemptBlocking {
+        val mcp = McpProcess.start(
+          dir,
+          List(Path.of(java.lang.System.getProperty("java.home"), "bin", "java").toString, "-jar", jar.toString, "--mcp", "--docs-url=none"),
+          Map("SBTA_RELEASES_URL" -> repo.toUri.toString),
+        )
+        try
+          mcp.send("""{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{"extensions":{"io.modelcontextprotocol/skills":{}}},"clientInfo":{"name":"spec","version":"1"}}}""")
+          mcp.send("""{"jsonrpc":"2.0","method":"notifications/initialized"}""")
+          val init = mcp.response(1, 60)
+          mcp.send("""{"jsonrpc":"2.0","id":2,"method":"skills/list","params":{}}""")
+          val listed = mcp.response(2, 300)
+          mcp.send("""{"jsonrpc":"2.0","id":3,"method":"resources/read","params":{"uri":"skill://spec/fixture/SKILL.md"}}""")
+          val read = mcp.response(3, 60)
+          val uris = listed.flatMap(path(_, "result", "skills")).collect { case Json.Arr(ss) => ss.toList }.getOrElse(Nil)
+            .flatMap(path(_, "uri")).collect { case Json.Str(u) => u }
+          assertTrue(
+            init.flatMap(path(_, "result", "instructions")).exists(_.toJson.contains("MCP Skills extension")),
+            uris == List("skill://spec/fixture/SKILL.md"),
+            read.exists(_.toJson.contains("# Fixture")),
+          )
+        finally mcp.close()
       }
     } @@ TestAspect.ifProp("os.name")(!_.toLowerCase.contains("win"))
 
