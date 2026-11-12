@@ -340,7 +340,7 @@ final class Session private (server: SbtServer, log: String => Unit, statusEvery
     connection = c
     try handshake(c)
     catch
-      case e: Throwable =>
+      case NonFatal(e) =>
         c.close()
         throw e
 

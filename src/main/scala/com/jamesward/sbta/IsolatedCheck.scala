@@ -6,6 +6,7 @@ import java.nio.file.{ Files, Path, StandardCopyOption }
 
 import scala.jdk.CollectionConverters.*
 import scala.util.Using
+import scala.util.control.NonFatal
 
 /**
  * A warm, classloader-isolated Scala 3 compiler used by the `check` tool.
@@ -93,7 +94,7 @@ private[sbta] object IsolatedCheck:
         new Session(loader, bridge, methods("check"), output, version)
       }
     catch
-      case error: Throwable =>
+      case NonFatal(error) =>
         loader.close()
         deleteRecursively(output)
         throw error

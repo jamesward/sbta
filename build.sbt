@@ -61,7 +61,7 @@ lazy val reader39 = (project in file("reader-3.9"))
 lazy val reader310 = (project in file("reader-3.10"))
   .settings(
     publish / skip := true,
-    scalaVersion := "3.10.0",
+    scalaVersion := "3.10.1",
     libraryDependencies := Seq("ch.epfl.scala" %% "tasty-query" % "1.10.0"),
   )
 
@@ -113,7 +113,7 @@ lazy val sbta = (project in file("."))
   .settings(
     name := "sbta",
     description := "sbta: an sbt launcher whose --mcp serves MCP over stdio as a client of the build's sbt server",
-    scalaVersion := "3.10.0",
+    scalaVersion := "3.10.1",
     scalacOptions ++= Seq("-release", "17", "-language:strictEquality", "-deprecation", "-Werror"),
     javacOptions ++= Seq("-source", "17", "-target", "17"),
     libraryDependencies ++= Seq(
@@ -129,7 +129,7 @@ lazy val sbta = (project in file("."))
       "org.ow2.asm"    % "asm"          % "9.11.1"   % Test,
       ("org.scala-sbt" % "sbt-launch"   % SbtLaunchVersion % SbtLaunch).intransitive(),
       "com.guardsquare" % "proguard-base" % "7.10.0" % Proguard,
-      "com.jamesward" % "skills" % "0.0.22" % Skills,
+      "com.jamesward" % "skills" % "0.0.26" % Skills,
     ),
     ivyConfigurations ++= Seq(SbtLaunch, Proguard),
     crossPaths := false,

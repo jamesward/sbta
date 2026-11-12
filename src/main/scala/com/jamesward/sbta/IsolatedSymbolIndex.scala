@@ -6,6 +6,7 @@ import java.nio.file.{ Files, Path, StandardCopyOption }
 
 import scala.jdk.CollectionConverters.*
 import scala.util.Using
+import scala.util.control.NonFatal
 
 /**
  * An in-process but classloader-isolated TASTy Query universe.
@@ -93,7 +94,7 @@ private[sbta] object IsolatedSymbolIndex:
       case error: InvocationTargetException =>
         loader.close()
         throw error.getCause
-      case error: Throwable =>
+      case NonFatal(error) =>
         loader.close()
         throw error
   end open
