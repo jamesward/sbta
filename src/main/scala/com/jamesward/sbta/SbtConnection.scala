@@ -107,7 +107,7 @@ final class SbtConnection private (
         IOException("unreachable")
       catch
         case _: EOFException  => IOException("sbt closed the connection (the server stopped, or was restarted)")
-        case error: Throwable => IOException(s"lost the connection to sbt: $error")
+        case NonFatal(error) => IOException(s"lost the connection to sbt: $error")
     closed.set(true)
     try channel.close() catch case NonFatal(_) => ()
     writer.shutdown()
@@ -183,7 +183,7 @@ object SbtConnection:
       channel.connect(UnixDomainSocketAddress.of(socket))
       SbtConnection(channel, onNotification)
     catch
-      case error: Throwable =>
+      case NonFatal(error) =>
         channel.close()
         throw error
 
