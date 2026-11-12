@@ -101,6 +101,13 @@ these engines started.
   `[error] (<task>) <exception>` summary lines, or else its first error line) or with
   the command line (cancelled). An
   interrupted call sends `sbt/cancelRequest {id}`.
+- **`project/target/sbta/mcp.log`** (always written, also to stderr) says what each
+  call did to sbt, for diagnosing a slow or stuck one afterwards: each command when it
+  starts (with its `sbt/exec` id) and finishes (succeeded, or the first line of why it
+  failed, and the time), sbt reporting a request queued (sbt 2's `Queued: waiting for:
+  …`, except its idle `shell`), every minute a request still runs (`Session.StatusEvery`)
+  with its latest output line, and a cancelled request's last 20 output lines. Command
+  output itself stays out of it; sbt's startup output is in `boot.log` next to it.
 - **`reboot`** (sbt's way to switch to a changed `sbt.version`) gets no response: sbt
   sends the channel a `shutdown` notification, `[log, [execId, remainingCommands]]`,
   closes it, and loads sbt again in the same JVM. sbta then does what sbtn does: waits
@@ -160,7 +167,19 @@ these engines started.
   `compile`, given up after 10 s or when queued) and index their class directories
   plus classpath; the index is keyed by a digest of their TASTy files (sbt 2 rewrites
   unchanged class files) and is primed after a rebuild, since a cold first search can
-  exceed the search's 10 s budget.
+  exceed the search's 10 s budget. `glob-search` walks the build's own class
+  directories; an `inPackage` with none of the build's symbols in it is read from the
+  whole classpath instead (a dependency's package). A query with `*`/`?` is a glob
+  matching whole names; another, a substring. `inspect` resolves, in order: a type
+  member of an object (`Api.Version`, with its companion's members), a class, trait or
+  object (top-level or nested; a class with its companion's members, `Foo$` for the
+  companion alone), a term of an object, and a package (`com.example` or
+  `com.example.package`: its types, then the top-level definitions in its
+  `<File>$package` objects). Members are the public ones the source writes (no
+  `$default$` getters, `writeReplace` or an object's constructor), rendered as Scala by
+  `ScalaSignatures` from tasty-query's public types, without package prefixes.
+  `glob-search` also takes `pattern` for `query` (`@fieldNameAliases`), as agents call it
+  that from other search tools.
 - **Aggregation** (not in BSP) comes from `show <p> / name`: sbt prints a
   `<q> / name` block for each project `q` that `p` aggregates (transitively); direct
   aggregates are the ones not reached through another. One command per root-build

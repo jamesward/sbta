@@ -323,7 +323,7 @@ final case class ExecResult(
  * (including forked tests and programs) comes back as `sbt/systemOut` bytes. sbt
  * sends a command's output to the channel that sent it, so each call gets its own.
  */
-final class Session private (server: SbtServer, log: String => Unit) extends AutoCloseable:
+final class Session private (server: SbtServer, log: String => Unit, statusEvery: java.time.Duration) extends AutoCloseable:
 
   @volatile private var connection: SbtConnection = null
   /** The activity of the tool call that opened this session (on its thread), to report what it runs. */
@@ -455,7 +455,10 @@ final class Session private (server: SbtServer, log: String => Unit) extends Aut
     case "sbt/exec" =>
       val fields = params.asObject.map(_.fields.toMap).getOrElse(Map.empty)
       if fields.get("status").contains(Json.Str("Queued")) then
-        onQueued(fields.get("message").collect { case Json.Str(m) => m }.getOrElse("queued"))
+        val message = fields.get("message").collect { case Json.Str(m) => m }.getOrElse("queued")
+        // "waiting for: shell" is sbt's idle prompt, about to give way: not worth a line.
+        if !message.endsWith("waiting for: shell") then log(s"sbt queued the request: $message")
+        onQueued(message)
     // sbt reads this channel's stdin (it flushes the command's output first, so a prompt is
     // already in `output`). Nobody types into sbta's channel: a failed build load's
     // "(r)etry, (q)uit, (l)ast, or (i)gnore?" is answered with (i)gnore, which keeps the
@@ -552,10 +555,11 @@ final class Session private (server: SbtServer, log: String => Unit) extends Aut
     activity.foreach(_.running(commandLine))
     val started      = System.nanoTime()
     val (id, future) = connection.request("sbt/exec", Json.Obj("commandLine" -> Json.Str(commandLine)))
+    log(s"running `$commandLine` ($id)")
     var rebooted     = Option.empty[Session.Rebooted]
     val error =
       try
-        await(id, future)
+        await(id, future, s"`$commandLine` ($id)")
         None
       catch
         case r: Session.Rebooted =>
@@ -614,11 +618,13 @@ final class Session private (server: SbtServer, log: String => Unit) extends Aut
       // Remember a broken build (for the note on later results) until a load succeeds.
       if failedLoad then server.loadFailed(errors)
       else if failure.isEmpty && (SbtServer.reloads(commandLine) || text.contains(Session.LoadedMarker)) then server.loadSucceeded()
+      val elapsedMs = (System.nanoTime() - started) / 1_000_000
+      log(s"`$commandLine` ${failure.fold("succeeded")(f => s"failed (${f.linesIterator.nextOption().getOrElse("").take(200)})")} in $elapsedMs ms")
       ExecResult(
         commandLine,
         failure.isEmpty,
         failure,
-        (System.nanoTime() - started) / 1_000_000,
+        elapsedMs,
         text,
         truncated,
         diagnostics.values.flatten.toList,
@@ -637,7 +643,7 @@ final class Session private (server: SbtServer, log: String => Unit) extends Aut
   private def query(key: String): Either[String, (Json, String)] =
     val (id, future) = connection.request("sbt/setting", Json.Obj("setting" -> Json.Str(key)))
     try
-      val result = await(id, future).asObject.map(_.fields.toMap).getOrElse(Map.empty)
+      val result = await(id, future, s"sbt/setting $key ($id)").asObject.map(_.fields.toMap).getOrElse(Map.empty)
       Right(result.getOrElse("value", Json.Null) -> result.get("contentType").collect { case Json.Str(t) => t }.getOrElse(""))
     catch case e: RpcError => Left(e.message)
 
@@ -646,7 +652,7 @@ final class Session private (server: SbtServer, log: String => Unit) extends Aut
     reloadIfChanged()
     bspInit()
     val (id, future) = connection.request(method, params)
-    await(id, future)
+    await(id, future, s"$method ($id)")
 
   /**
    * Like [[bsp]], but None as soon as sbt reports that the request is queued behind
@@ -667,7 +673,7 @@ final class Session private (server: SbtServer, log: String => Unit) extends Aut
       if !future.isDone then
         try future.get(1, TimeUnit.SECONDS)
         catch case _: TimeoutException | _: java.util.concurrent.ExecutionException => ()
-      if future.isDone then Some(await(id, future)) else None
+      if future.isDone then Some(await(id, future, s"$method ($id)")) else None
     catch
       case e: InterruptedException =>
         cancel(id)
@@ -688,7 +694,7 @@ final class Session private (server: SbtServer, log: String => Unit) extends Aut
           "capabilities" -> Json.Obj("languageIds" -> Json.Arr(Json.Str("scala"), Json.Str("java"))),
         ),
       )
-      await(id, future)
+      await(id, future, "build/initialize")
       connection.notify("build/initialized", Json.Obj())
       bspReady = true
 
@@ -697,29 +703,48 @@ final class Session private (server: SbtServer, log: String => Unit) extends Aut
   def collectedOutput: String                = synchronized(Text.stripAnsi(output.toString))
 
   /**
-   * Wait for a response. When the waiting thread is interrupted (the MCP client
-   * cancelled the call), ask sbt to cancel the running command, then give up.
+   * Wait for a response to `what`. While it runs, say so in the log every
+   * `statusEvery`, with its latest output line, so a slow or stuck command can be
+   * told apart afterwards. When the waiting thread is interrupted (the MCP client
+   * cancelled the call), log the request's last output, ask sbt to cancel it, and
+   * give up.
    */
-  private def await(id: String, future: CompletableFuture[Json]): Json =
-    val reboot = rebooting
+  private def await(id: String, future: CompletableFuture[Json], what: String): Json =
+    val reboot  = rebooting
+    val started = System.nanoTime()
+    def elapsed = s"${(System.nanoTime() - started) / 1_000_000_000L} s"
     def rebootedIfSo(): Unit =
       if reboot.isDone && !(future.isDone && !future.isCompletedExceptionally) then
         val (execId, remaining) = reboot.get()
         throw Session.Rebooted(execId, remaining)
     try
-      try CompletableFuture.anyOf(future, reboot).get()
-      catch case _: java.util.concurrent.ExecutionException => () // the request failed: see below
+      var answered = false
+      while !answered do
+        try
+          CompletableFuture.anyOf(future, reboot).get(statusEvery.toMillis, TimeUnit.MILLISECONDS)
+          answered = true
+        catch
+          case _: TimeoutException =>
+            log(s"$what still running after $elapsed; " + lastOutput(1).fold("no output yet")(l => s"last output: $l"))
+          case _: java.util.concurrent.ExecutionException => answered = true // the request failed: see below
       // A reboot closes the channel too (after its `shutdown` notification, so `reboot` is
       // complete by then): report the reboot, not the closed connection.
       rebootedIfSo()
       future.get()
     catch
       case _: InterruptedException =>
+        log(s"$what cancelled after $elapsed; " +
+          lastOutput(Session.CancelledTail).fold("no output")(tail => s"its last output:\n$tail"))
         cancel(id)
         throw InterruptedException("cancelled")
       case e: java.util.concurrent.ExecutionException =>
         rebootedIfSo()
         throw e.getCause
+
+  /** The last `lines` non-blank lines of this channel's output, if it has any. */
+  private def lastOutput(lines: Int): Option[String] =
+    val text = synchronized(Text.stripAnsi(output.toString))
+    Option(text.linesIterator.map(_.stripTrailing).filter(_.nonEmpty).toSeq.takeRight(lines).mkString("\n")).filter(_.nonEmpty)
 
   /** Ask sbt to cancel request `id`, waiting (at most 5 s, even if interrupted again) for its answer. */
   private def cancel(id: String): Unit =
@@ -792,8 +817,13 @@ object Session:
       case List(p, c, k) => config(c).map(cfg => s"$p/$cfg:$k")
       case List(c, k)    => config(c).map(cfg => s"$cfg:$k")
       case _             => None
-  def open(server: SbtServer, socket: Path, log: String => Unit): Session =
-    val session = Session(server, log)
+  /** How often the log says a request is still running. */
+  val StatusEvery: java.time.Duration = java.time.Duration.ofSeconds(60)
+  /** How many output lines the log keeps of a cancelled request. */
+  val CancelledTail = 20
+
+  def open(server: SbtServer, socket: Path, log: String => Unit, statusEvery: java.time.Duration = StatusEvery): Session =
+    val session = Session(server, log, statusEvery)
     session.connect(socket)
     session
 

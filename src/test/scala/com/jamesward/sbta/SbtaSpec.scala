@@ -106,6 +106,10 @@ object SbtaSpec extends ZIOSpecDefault:
                   Thread.sleep(50)
                   writeActive(dir, socket)
                 case "slow" => running = Some(id) // answered when cancelled
+                case "queued" =>
+                  // As sbt 2 for a command waiting behind another channel's.
+                  write(out, """{"jsonrpc":"2.0","method":"sbt/exec","params":{"status":"Queued","message":"Queued: waiting for: compile"}}""")
+                  write(out, s"""{"jsonrpc":"2.0","id":$id,"result":{"status":"Done","exitCode":0}}""")
                 case "reload-broken" =>
                   // As sbt's doLoadFailed: the error and the prompt, then a read of the channel's stdin.
                   val prompt = s"[error] build.sbt:3: error: not found: noSuchSetting\n[warn] ${Session.LoadFailedPrompt}\n"
@@ -285,6 +289,63 @@ object SbtaSpec extends ZIOSpecDefault:
         yield assertTrue(seen.contains("sbt/cancelRequest"))
       }
     } @@ TestAspect.withLiveClock,
+    test("the symbol tools' misses say how to name a symbol, what glob-search covers, and where dependency sources are") {
+      val notFound = CodeTools.notFound("com.example.Nope", docsTools = true)
+      val noDocs   = CodeTools.notFound("com.example.Nope")
+      val none     = CodeTools.noMatches("*Codec*", Some("com.example"), docsTools = true)
+      assertTrue(
+        notFound.startsWith("symbol not found: com.example.Nope. "),
+        notFound.contains("`Service$` for just its companion"),
+        notFound.contains("a package (with its top-level definitions) as `com.example`"),
+        notFound.contains("`symbol_to_artifact`"),
+        notFound.contains("`get_source_file`"),
+        !noDocs.contains("get_source_file"),
+        none.startsWith("no symbols matching '*Codec*' in `com.example`. "),
+        none.contains("a dependency's package only when given as `inPackage`"),
+        none.contains("`list_source_files`"),
+      )
+    },
+    test("glob-search takes `pattern` for `query`, which agents use from other search tools, and advertises `query`") {
+      import com.jamesward.ziohttp.mcp.*
+      val input   = summon[McpInput[McpMain.GlobSearchArgs]]
+      val aliased = input.decode(Some(Json.Obj("pattern" -> Json.Str("*Version*"), "inPackage" -> Json.Str("com.example"))))
+      val named   = input.decode(Some(Json.Obj("query" -> Json.Str("*Version*"))))
+      val properties = input.jsonSchema.get("properties").flatMap(_.asObject).map(_.fields.map(_._1).toList)
+      assertTrue(
+        aliased.toOption.map(a => (a.query, a.inPackage)).contains(("*Version*", Some("com.example"))),
+        named.toOption.map(a => (a.query, a.inPackage)).contains(("*Version*", None)),
+        properties.contains(List("query", "inPackage")),
+      )
+    },
+    test("the log says what each command did: run and finished, queued, still running with its last output, and cancelled with its output") {
+      withBuild { dir =>
+        val (socket, seen) = fakeSbt(dir)
+        val lines = java.util.concurrent.ConcurrentLinkedQueue[String]()
+        val s = Session.open(SbtServer(dir, StartMode.Never, _ => ()), socket, line => { lines.add(line); () },
+          statusEvery = java.time.Duration.ofMillis(100))
+        try
+          s.exec("compile")
+          s.exec("fail")
+          s.exec("queued")
+          val caller = Thread(() => { try s.exec("slow") catch case _: Exception => (); () })
+          caller.start()
+          val deadline = java.lang.System.nanoTime() + 10_000_000_000L
+          def logged(p: String => Boolean) = lines.toArray(Array.empty[String]).exists(p)
+          while !logged(_.contains("still running")) && java.lang.System.nanoTime() < deadline do Thread.sleep(10)
+          caller.interrupt()
+          caller.join(10_000)
+          val log = lines.toArray(Array.empty[String]).toList
+          def has(p: String => Boolean) = assertTrue(log.exists(p))
+          has(l => l.startsWith("running `compile` (sbta-")) &&
+            has(l => l.matches("`compile` succeeded in \\d+ ms")) &&
+            has(l => l.startsWith("`fail` failed ((Compile / compile) Compilation failed) in ")) &&
+            has(_ == "sbt queued the request: Queued: waiting for: compile") &&
+            has(l => l.matches("`slow` \\(sbta-\\d+\\) still running after 0 s; last output: red")) &&
+            has(l => l.matches("(?s)`slow` \\(sbta-\\d+\\) cancelled after \\d+ s; its last output:\n\\[info\\] running slow\nred")) &&
+            has(_.startsWith("cancelling sbt request sbta-"))
+        finally s.close()
+      }
+    },
     test("repeated interrupts (as ZIO's attemptBlockingInterrupt sends) don't close the connection before the cancel is sent") {
       withBuild { dir =>
         val (socket, seen) = fakeSbt(dir)

@@ -20,7 +20,8 @@ import scala.util.control.NonFatal
  * cached (until a build definition file changes, or sbt restarts) and, while sbt is
  * busy, the cached copy is used: a check never waits behind a running build.
  */
-final class CodeTools(server: SbtServer, log: String => Unit):
+/** @param docsTools the javadocs.dev tools are proxied, so "not found" answers can point to them */
+final class CodeTools(server: SbtServer, log: String => Unit, docsTools: Boolean = false):
 
   /** One BSP build target (a project's Compile or Test configuration) and what `check` needs from it. */
   final case class Module(
@@ -332,21 +333,25 @@ final class CodeTools(server: SbtServer, log: String => Unit):
       val body = SymbolIndexState.globSearchResult(query, inPackage.map(_.trim).filter(_.nonEmpty)) match
         case SymbolIndexState.QueryResult.Unavailable(message) => message
         case SymbolIndexState.QueryResult.Available(hits) =>
-          if hits.isEmpty then s"no symbols matching '$query'" else hits.map(h => s"${h.kind} ${h.fqn}").mkString("\n")
+          if hits.isEmpty then CodeTools.noMatches(query, inPackage.map(_.trim).filter(_.nonEmpty), docsTools)
+          else hits.map(h => s"${h.kind} ${h.fqn}").mkString("\n")
       withNote(body, note)
 
   def inspect(symbol: String): String =
     val note = refreshSymbols()
     val body = SymbolIndexState.inspectResult(symbol.trim) match
       case SymbolIndexState.QueryResult.Unavailable(message) => message
-      case SymbolIndexState.QueryResult.Available(result)    => result.getOrElse(s"symbol not found: $symbol")
+      case SymbolIndexState.QueryResult.Available(result)    => result.getOrElse(CodeTools.notFound(symbol, docsTools))
     withNote(body, note)
 
   def location(symbol: String): String =
     val note = refreshSymbols()
     val body = SymbolIndexState.locationResult(symbol.trim) match
       case SymbolIndexState.QueryResult.Unavailable(message) => message
-      case SymbolIndexState.QueryResult.Available(result)    => result.map(relativeLocation).getOrElse(s"no source location for $symbol")
+      case SymbolIndexState.QueryResult.Available(result)    =>
+        result.map(relativeLocation).getOrElse(
+          s"no source location for $symbol (not found, or its TASTy has no positions). ${CodeTools.Naming}${CodeTools.docsHint(docsTools)}"
+        )
     withNote(body, note)
 
   /** `path:line` with the path relative to the build root when it is inside it. */
@@ -361,3 +366,27 @@ final class CodeTools(server: SbtServer, log: String => Unit):
       catch case NonFatal(_) => location
 
   private def withNote(body: String, note: Option[String]): String = note.fold(body)(n => s"$body\n(note: $n)")
+
+object CodeTools:
+
+  /** How the symbol tools want a name, for the answer to one they couldn't find. */
+  val Naming: String =
+    "Name a class, trait or object by its fully-qualified name (`com.example.Service`; `Service$` for just its " +
+      "companion), a type, object or member inside an object through it (`com.example.Api.Version`), and a " +
+      "package (with its top-level definitions) as `com.example`."
+
+  /** Where a dependency's sources are, when the javadocs.dev tools are proxied. */
+  def docsHint(docsTools: Boolean): String =
+    if docsTools then
+      " For a dependency's sources: `symbol_to_artifact` finds the artifact of a class, then `list_source_files` " +
+        "and `get_source_file` read them."
+    else ""
+
+  def notFound(symbol: String, docsTools: Boolean = false): String =
+    s"symbol not found: $symbol. $Naming `glob-search` finds names.${docsHint(docsTools)}"
+
+  /** No `glob-search` hits: say what it searches, and what reaches the rest. */
+  def noMatches(query: String, inPackage: Option[String], docsTools: Boolean = false): String =
+    s"no symbols matching '$query'${inPackage.fold("")(p => s" in `$p`")}. `glob-search` searches this build's own " +
+      "symbols, and a dependency's package only when given as `inPackage` and the build has none in it. `inspect` " +
+      s"reads any class, object or package on the classpath by name.${docsHint(docsTools)}"

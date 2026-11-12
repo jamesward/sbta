@@ -119,7 +119,7 @@ lazy val sbta = (project in file("."))
     libraryDependencies ++= Seq(
       // zio-http pulls in netty-pkitesting (test-certificate generation) and with it
       // Bouncy Castle (~11 MB): sbta never serves TLS, so leave them out of the jar.
-      ("com.jamesward" %% "zio-http-mcp" % "0.13.2")
+      ("com.jamesward" %% "zio-http-mcp" % "0.13.3")
         .exclude("io.netty", "netty-pkitesting")
         .exclude("org.bouncycastle", "bcprov-jdk18on")
         .exclude("org.bouncycastle", "bcpkix-jdk18on")

@@ -10,7 +10,7 @@ import zio.*
 import zio.http.Client
 import zio.json.ast.Json
 import zio.schema.{ DeriveSchema, Schema }
-import zio.schema.annotation.description
+import zio.schema.annotation.{ description, fieldNameAliases }
 
 import java.io.{ FileOutputStream, PrintStream }
 import java.nio.file.{ Files, Path }
@@ -106,7 +106,7 @@ object McpMain:
     log(s"MCP server ${SbtaBuildInfo.version} for $base (start=${start.toString.toLowerCase}, java ${java.lang.System.getProperty("java.version")})")
     val server = SbtServer(base, start, log)
     val tools  = SbtTools(server, log)
-    val code   = CodeTools(server, log)
+    val code   = CodeTools(server, log, docsTools = docsUrl.isDefined)
     val skills = BuildSkills(server, log)
 
     if start == StartMode.Eager then
@@ -250,7 +250,10 @@ object McpMain:
       }
 
   final case class GlobSearchArgs(
-      @description("An unqualified name or glob (`*Service`, `Foo*`); `*` (or empty) with `inPackage` lists the package.") query: String,
+      // Other search tools call this `pattern`, and agents do too: accept that as well.
+      @description("What to search for: an unqualified name or glob (`*Service`, `Foo*`); `*` (or empty) with `inPackage` lists the package.")
+      @fieldNameAliases("pattern")
+      query: String,
       @description("Restrict to a package, e.g. `com.example` (recommended).") inPackage: Option[String] = None,
   )
   object GlobSearchArgs { given Schema[GlobSearchArgs] = DeriveSchema.gen[GlobSearchArgs] }
@@ -270,8 +273,9 @@ object McpMain:
     McpTool("glob-search")
       .description(
         "Search Scala 3 symbols by unqualified name in this build's projects (read from their TASTy). Dependency " +
-          "jars are used to resolve types and can be inspected exactly with `inspect`/`symbol-location`, but are not " +
-          "enumerated here. Set `inPackage` to restrict to a package; `query`=\"*\" (or empty) with `inPackage` LISTS " +
+          "jars are used to resolve types, and are searched only as an `inPackage` the build has nothing in, e.g. " +
+          "{\"query\":\"*\",\"inPackage\":\"com.dependency\"}; `inspect` reads any of their classes, objects or " +
+          "packages by name. Set `inPackage` to restrict to a package; `query`=\"*\" (or empty) with `inPackage` LISTS " +
           "ALL symbols in it, e.g. {\"query\":\"*\",\"inPackage\":\"com.example\"}. Returns each match's kind and " +
           "fully-qualified name. The project is compiled first (unless sbt is busy) so new symbols appear."
       )
@@ -283,8 +287,11 @@ object McpMain:
   private def inspectTool(code: CodeTools): McpToolHandler =
     McpTool("inspect")
       .description(
-        "Inspect a Scala 3 symbol by fully-qualified name: its members and (approximate) signatures. Works for " +
-          "classes, objects and traits of this build and its dependencies."
+        "Inspect a Scala 3 symbol by fully-qualified name: its public members as Scala signatures. Works for " +
+          "this build and its dependencies: a class, trait or object (also nested in an object), with its " +
+          "companion's members (`Foo$` for just the companion, e.g. its givens); a type (an opaque type, with its " +
+          "companion's members), object or member inside an object, e.g. `com.example.Api.Version`; and a package, " +
+          "`com.example` (or `com.example.package`), with its types and its top-level definitions."
       )
       .annotations(readOnly = OptBool.True)
       .handle[Any, Throwable, SymbolArgs, String] { (args: SymbolArgs) =>
@@ -294,8 +301,8 @@ object McpMain:
   private def locationTool(code: CodeTools): McpToolHandler =
     McpTool("symbol-location")
       .description(
-        "Return the source location (`path:line`) of a Scala 3 symbol (a class, object, trait, or a top-level/static " +
-          "term), read from its defining tree in TASTy."
+        "Return the source location (`path:line`) of a Scala 3 symbol (a class, object, trait, a type or object " +
+          "inside an object, or a top-level/static term), read from its defining tree in TASTy."
       )
       .annotations(readOnly = OptBool.True)
       .handle[Any, Throwable, SymbolArgs, String] { (args: SymbolArgs) =>

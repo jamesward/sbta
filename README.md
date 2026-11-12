@@ -82,6 +82,11 @@ the notices off, and `SBTA_NO_UPDATE_CHECK=1` (or `CI=true`) the check.
 Clients start project servers in the project's root directory; elsewhere, add
 `--project-dir=<build root>`.
 
+The server logs what it does to `project/target/sbta/mcp.log`: starting sbt, and each
+sbt command it runs, queued behind another, still running (every minute, with its
+latest output line) or cancelled (with its last output). sbt's startup output is in
+`boot.log` next to it.
+
 | Tool | What it does |
 |---|---|
 | `compile` | Compile (`configuration`: `compile`/`test`); errors and warnings as `{severity, file, line, column, message}` |
@@ -94,7 +99,7 @@ Clients start project servers in the project's root directory; elsewhere, add
 | `show` | A setting's value (as JSON when sbt can write it), or a task's result |
 | `sbt-task`, `list-tasks` | Run any sbt command line; list the tasks |
 | `check` | Type-check Scala 3 files without compiling, with the module's own compiler (warm, in sbta), never waiting behind sbt |
-| `glob-search`, `inspect`, `symbol-location` | Scala 3 symbols from TASTy (3.3–3.10): search, members, source location |
+| `glob-search`, `inspect`, `symbol-location` | Scala 3 symbols from TASTy (3.3–3.10): search (a name or a glob such as `*Version*`; a dependency's package with `inPackage`), members as Scala signatures, source location. A class, trait or object, also one nested in an object, with its companion's members (`Foo$` for the companion alone); a type (such as an opaque type) or member inside an object, e.g. `com.example.Api.Version`; or a package, with its top-level definitions |
 | `update-sbta` | Update the build's `sbta` and `sbta.bat` to the newest (or a given) release |
 
 Plus the [javadocs.dev](https://www.javadocs.dev/mcp) tools, proxied. Commands run on
