@@ -532,9 +532,10 @@ object LauncherSpec extends ZIOSpecDefault:
     test("sbt-task `reboot` after an sbt.version change switches versions and runs the rest of the line; a failed reboot reports why") {
       val dir   = build(sbtVersion)
       val props = dir.resolve("project/build.properties")
-      // A neighbouring release: 1.12.15 → 1.12.14, 2.0.12 → 2.0.11.
+      // A neighbouring release: 1.12.15 → 1.12.14, 2.1.0 → 2.0.12.
       val other = sbtVersion.split('.') match
-        case Array(a, b, c) => s"$a.$b.${c.toInt - 1}"
+        case Array("2", "1", "0") => "2.0.12"
+        case Array(a, b, c)       => s"$a.$b.${c.toInt - 1}"
         case _              => sbtVersion
       def call(mcp: McpProcess, id: Int, command: String, timeoutSeconds: Long) =
         mcp.send(s"""{"jsonrpc":"2.0","id":$id,"method":"tools/call","params":{"name":"sbt-task","arguments":{"command":"$command"}}}""")
@@ -660,7 +661,7 @@ object LauncherSpec extends ZIOSpecDefault:
           attempt += 1
           Thread.sleep(250)
 
-  def spec = suite("sbta as a launcher")(suiteFor("1.12.15"), suiteFor("2.0.12")) @@ TestAspect.sequential @@
+  def spec = suite("sbta as a launcher")(suiteFor("1.12.15"), suiteFor("2.1.0")) @@ TestAspect.sequential @@
     TestAspect.withLiveClock @@ TestAspect.afterAll(ZIO.succeed(deleteRecursively(repo)))
 
   /** A newline-delimited JSON-RPC subprocess (an MCP stdio server). */

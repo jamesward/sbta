@@ -74,8 +74,6 @@ object SbtaScripts {
   private def unixEdits(mode: Mode): Seq[(String, String)] = {
     val common = Seq(
       "jps -v | grep sbt-launch | cut -f1 -d ' '" -> "jps -v | grep -E 'sbt-launch|sbta' | cut -f1 -d ' '",
-      // Without --fail, curl saves a 404 page as the jar (and with no shasum to catch it, keeps it).
-      "      curl --silent -L \"$url\" --output \"$jar\"" -> "      curl --fail --silent -L \"$url\" --output \"$jar\"",
       "  --client            run sbtn (native client), and start sbt server in the background\n" ->
         "  --client            run sbtn (native client), and start sbt server in the background\n  --mcp               serve MCP over stdio for this build (sbta), starting sbt when needed\n",
     )

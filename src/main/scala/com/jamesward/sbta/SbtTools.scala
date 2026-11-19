@@ -413,7 +413,7 @@ final class SbtTools(server: SbtServer, log: String => Unit):
               s"dependencies: `$p / update` failed: ${updated.error.getOrElse("")}\n${Text.lastChars(updated.output, 4000)._1}"
             else
               val report = targetOf(s, p).flatMap(updateCache).flatMap(file =>
-                try zio.json.ast.Json.decoder.decodeJson(java.nio.file.Files.readString(file)).toOption
+                try zio.json.ast.Json.decoder.decodeJson(readCache(file)).toOption
                 catch case NonFatal(_) => None
               )
               report match
@@ -488,6 +488,15 @@ final class SbtTools(server: SbtServer, log: String => Unit):
     }.flatMap { v =>
       try Some(if v.startsWith("file:") then Path.of(URI.create(v)) else Path.of(v)) catch case NonFatal(_) => None
     }
+
+  /** The cache's JSON text: plain in sbt 1 and sbt 2.0, gzip-compressed since sbt 2.1. */
+  private def readCache(file: Path): String =
+    val bytes = Files.readAllBytes(file)
+    if bytes.length > 2 && (bytes(0) & 0xff) == 0x1f && (bytes(1) & 0xff) == 0x8b then
+      scala.util.Using.resource(new java.util.zip.GZIPInputStream(new java.io.ByteArrayInputStream(bytes)))(in =>
+        new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8)
+      )
+    else new String(bytes, java.nio.charset.StandardCharsets.UTF_8)
 
   /** The newest `update/update_cache_<n>/output` under `target`. */
   private def updateCache(target: Path): Option[Path] =

@@ -18,7 +18,7 @@ set _JAVACMD=
 set _SBT_OPTS=
 set _JAVA_OPTS=
 
-set init_sbt_version=2.0.12
+set init_sbt_version=2.1.0
 rem sbta: this build's own sbta jar, relative to this script (written by `sbtaInstall`).
 rem Until it exists, this script is plain sbt and runs sbt's launcher.
 set sbta_local_jar=target\sbta-local\sbta.jar
@@ -54,6 +54,7 @@ set sbt_args_allow_empty=
 set sbt_args_sbt_dir=
 set sbt_args_sbt_version=
 set sbt_args_mem=
+set sbt_args_java_opts=
 set sbt_args_client=-1
 set sbt_args_jvm_client=
 set sbt_args_no_server=
@@ -91,7 +92,8 @@ if exist "!SBT_CONFIG!" (
 )
 
 rem poor man's jenv (which is not available on Windows)
-if defined JAVA_HOMES (
+rem explicit -java-home wins over the project .java-version
+if not defined SBT_EXPLICIT_JAVA_HOME if defined JAVA_HOMES (
   if exist .java-version for /F %%A in (.java-version) do (
     set JAVA_HOME=%JAVA_HOMES%\%%A
     set JDK_HOME=%JAVA_HOMES%\%%A
@@ -487,6 +489,7 @@ if "%~0" == "shutdownall" (
 
 if "%~0" == "bsp" (
   set sbt_args_client=0
+  set SBT_ARGS=!SBT_ARGS! -bsp
   goto args_loop
 )
 
@@ -526,8 +529,11 @@ if defined _java_home_arg (
   if not "%~1" == "" (
     if exist "%~1\bin\java.exe" (
       set "_JAVACMD=%~1\bin\java.exe"
+      set "JAVACMD=%~1\bin\java.exe"
       set "JAVA_HOME=%~1"
       set "JDK_HOME=%~1"
+      set "SBT_EXPLICIT_JAVA_HOME=1"
+      set "PATH=%~1\bin;!PATH!"
       shift
       goto args_loop
     ) else (
@@ -606,6 +612,32 @@ if "%g:~0,2%" == "-X" (
   call :addJava "%~0"
   goto args_loop
 )
+
+rem -J-X passes -X to the java runtime. The -J form is kept as well, so that
+rem the native client can pass it on to the sbt server it starts.
+rem See the -D handling above for why this is flat rather than nested blocks.
+if not "%g:~0,2%" == "-J" goto args_loop_after_J
+set "g_opt=%g:~2%"
+if "%g_opt%" == "" goto args_loop
+set "g_key="
+for /F "tokens=1 delims==" %%a in ("%g%") do set "g_key=%%a"
+if not "%g%" == "%g_key%" goto args_loop_J_add
+if "%~1" == "" goto args_loop_J_add
+rem like -D and -XX above, since '=' gets parsed away
+if "%g_opt:~0,2%" == "-D" goto args_loop_J_join
+if "%g_opt:~0,5%" == "-XX:+" goto args_loop_J_add
+if "%g_opt:~0,5%" == "-XX:-" goto args_loop_J_add
+if "%g_opt:~0,3%" == "-XX" goto args_loop_J_join
+goto args_loop_J_add
+:args_loop_J_join
+set "g_opt=%g_opt%=%~1"
+shift
+:args_loop_J_add
+call :dlog [args_loop] -J argument %g_opt%
+call :addJava "%g_opt%"
+set sbt_args_java_opts=!sbt_args_java_opts! "-J%g_opt%"
+goto args_loop
+:args_loop_after_J
 
 rem See the -D handling above for why this is flat rather than nested blocks.
 if not defined sbt_new goto args_loop_after_dashdash
@@ -748,8 +780,6 @@ if defined sbt_args_sbt_version (
 
 if defined sbt_args_sbt_dir (
   set _SBT_OPTS="-Dsbt.global.base=!sbt_args_sbt_dir!" !_SBT_OPTS!
-) else if defined LOCALAPPDATA (
-  set _SBT_OPTS="-Dsbt.global.base=!LOCALAPPDATA!\sbt" !_SBT_OPTS!
 )
 
 if defined sbt_args_sbt_boot (
@@ -855,6 +885,8 @@ if defined sbt_args_verbose (
   if not "%~1" == "" ( call :echolist %* )
   set SBT_ARGS=-v !SBT_ARGS!
 )
+
+if defined sbt_args_java_opts set SBT_ARGS=!sbt_args_java_opts! !SBT_ARGS!
 
 for %%I in ("!SBT_BIN_DIR!sbt.bat") do set "SBT_SCRIPT=%%~sI"
 set SBT_ARGS=--sbt-script=!SBT_SCRIPT! %SBT_ARGS%
@@ -994,10 +1026,15 @@ exit /B 0
   set _has_memory_args=
 
   if defined _JAVA_OPTS for %%g in (%_JAVA_OPTS%) do (
-    set "p=%%g"
+    set "p=%%~g"
     if "!p:~0,4!" == "-Xmx" set _has_memory_args=1
     if "!p:~0,4!" == "-Xms" set _has_memory_args=1
     if "!p:~0,4!" == "-Xss" set _has_memory_args=1
+    if "!p:~0,32!" == "-XX:+UseCGroupMemoryLimitForHeap" set _has_memory_args=1
+    if "!p:~0,10!" == "-XX:MaxRAM" set _has_memory_args=1
+    if "!p:~0,24!" == "-XX:InitialRAMPercentage" set _has_memory_args=1
+    if "!p:~0,20!" == "-XX:MaxRAMPercentage" set _has_memory_args=1
+    if "!p:~0,20!" == "-XX:MinRAMPercentage" set _has_memory_args=1
   )
 
   if defined JAVA_TOOL_OPTIONS for %%g in (%JAVA_TOOL_OPTIONS%) do (
@@ -1005,6 +1042,11 @@ exit /B 0
     if "!p:~0,4!" == "-Xmx" set _has_memory_args=1
     if "!p:~0,4!" == "-Xms" set _has_memory_args=1
     if "!p:~0,4!" == "-Xss" set _has_memory_args=1
+    if "!p:~0,32!" == "-XX:+UseCGroupMemoryLimitForHeap" set _has_memory_args=1
+    if "!p:~0,10!" == "-XX:MaxRAM" set _has_memory_args=1
+    if "!p:~0,24!" == "-XX:InitialRAMPercentage" set _has_memory_args=1
+    if "!p:~0,20!" == "-XX:MaxRAMPercentage" set _has_memory_args=1
+    if "!p:~0,20!" == "-XX:MinRAMPercentage" set _has_memory_args=1
   )
 
   if defined JDK_JAVA_OPTIONS for %%g in (%JDK_JAVA_OPTIONS%) do (
@@ -1012,6 +1054,11 @@ exit /B 0
     if "!p:~0,4!" == "-Xmx" set _has_memory_args=1
     if "!p:~0,4!" == "-Xms" set _has_memory_args=1
     if "!p:~0,4!" == "-Xss" set _has_memory_args=1
+    if "!p:~0,32!" == "-XX:+UseCGroupMemoryLimitForHeap" set _has_memory_args=1
+    if "!p:~0,10!" == "-XX:MaxRAM" set _has_memory_args=1
+    if "!p:~0,24!" == "-XX:InitialRAMPercentage" set _has_memory_args=1
+    if "!p:~0,20!" == "-XX:MaxRAMPercentage" set _has_memory_args=1
+    if "!p:~0,20!" == "-XX:MinRAMPercentage" set _has_memory_args=1
   )
 
   if defined _SBT_OPTS for %%g in (%_SBT_OPTS%) do (
@@ -1019,6 +1066,11 @@ exit /B 0
     if "!p:~0,4!" == "-Xmx" set _has_memory_args=1
     if "!p:~0,4!" == "-Xms" set _has_memory_args=1
     if "!p:~0,4!" == "-Xss" set _has_memory_args=1
+    if "!p:~0,32!" == "-XX:+UseCGroupMemoryLimitForHeap" set _has_memory_args=1
+    if "!p:~0,10!" == "-XX:MaxRAM" set _has_memory_args=1
+    if "!p:~0,24!" == "-XX:InitialRAMPercentage" set _has_memory_args=1
+    if "!p:~0,20!" == "-XX:MaxRAMPercentage" set _has_memory_args=1
+    if "!p:~0,20!" == "-XX:MinRAMPercentage" set _has_memory_args=1
   )
 
   if not defined _has_memory_args (
@@ -1249,16 +1301,25 @@ echo   -debug-inc ^| --debug-inc
 echo                       enable extra debugging for the incremental compiler
 echo   --experimental_execution_log=true^|^<path^>
 echo                       enable experimental execution log
-rem echo   -J-X                pass option -X directly to the java runtime
-rem echo                       ^(-J is stripped^)
+echo   -J-X                pass option -X directly to the java runtime
+echo                       ^(-J is stripped^)
 rem echo   -S-X                add -X to sbt's scalacOptions ^(-S is stripped^)
 echo.
 echo In the case of duplicated or conflicting options, the order above
 echo shows precedence: JAVA_OPTS lowest, command line options highest.
 echo.
+echo Getting started with sbt:
+echo.
+echo   - To create a new project run: sbt init
+echo.
+echo   - Once in the sbt shell, type:
+echo       help
+echo       help ^<command^>
+echo     to see available commands and detailed help.
+echo.
 
 @endlocal
-exit /B 1
+exit /B 0
 
 :set_sbt_version
 set "sbt_version="
