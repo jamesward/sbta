@@ -239,6 +239,7 @@ object LauncherSpec extends ZIOSpecDefault:
         "show"            -> """{"key":"app / name"}""",
         "show"            -> """{"key":"app / Compile / mainClass"}""",
         "test"            -> """{"project":"app"}""",
+        "test"            -> """{"project":"app","full":true}""",
         "run"             -> """{"project":"app","args":["x"]}""",
         "publish-local"   -> """{"project":"leaf"}""",
         "sbt-task"        -> """{"command":"leaf/name"}""",
@@ -282,6 +283,9 @@ object LauncherSpec extends ZIOSpecDefault:
             case (tool, Some(r)) if broken.findFirstIn(r.toJson).isDefined        => s"$tool: ${r.toJson.take(500)}"
           }
           val text = results.toMap.view.mapValues(_.map(_.toJson).getOrElse("")).toMap
+          // `full` runs sbt 2's `testFull`; sbt 1's `test` already runs every test.
+          val fullTest = results.collect { case ("test", r) => r.map(_.toJson).getOrElse("") }.last
+          val sbt2     = Files.readString(dir.resolve("project/build.properties")).contains("sbt.version=2.")
           failures.foreach(f => println(s"tool failed: $f"))
           assertTrue(
             failures.isEmpty,
@@ -289,6 +293,7 @@ object LauncherSpec extends ZIOSpecDefault:
             text("echo").contains("echo: hi"),
             text("run").contains("hello 1 x"),
             text("glob-search").contains("leaf.Leaf"),
+            fullTest.contains("app / testFull") == sbt2,
           )
       }
     } @@ TestAspect.ifProp("os.name")(!_.toLowerCase.contains("win"))

@@ -137,7 +137,7 @@ final class SbtTools(server: SbtServer, log: String => Unit):
       val fargs = if frameworkArgs.isEmpty then "" else " -- " + frameworkArgs.map(quote).mkString(" ")
       val command =
         if tests.nonEmpty || frameworkArgs.nonEmpty then s"${p}testOnly ${tests.map(quote).mkString(" ")}$fargs".replace("testOnly  --", "testOnly --")
-        else if full && sbtMajor(s) >= 2 then s"${p}testFull"
+        else if full && sbt2 then s"${p}testFull"
         else s"${p}test"
       val startedAt = System.currentTimeMillis() - 1000
       val r         = s.exec(command)
@@ -159,9 +159,12 @@ final class SbtTools(server: SbtServer, log: String => Unit):
       ).toJson
     }
 
-  /** The build's sbt major version (1 or 2). */
-  private def sbtMajor(s: Session): Int =
-    s.setting("sbtVersion").toOption.collect { case (Json.Str(v), _) => v.takeWhile(_ != '.').toIntOption.getOrElse(1) }.getOrElse(1)
+  /**
+   * Whether the build runs sbt 2, from `project/build.properties` (which sbt writes if
+   * it's missing, and sbta restarts the server when it changes). Not from the server's
+   * `sbtVersion` setting: `sbt/setting` needs a project axis, so the unscoped key fails.
+   */
+  private def sbt2: Boolean = SbtServer.sbtVersion(server.base).exists(!_.startsWith("1."))
 
   // ---- run ----
 
