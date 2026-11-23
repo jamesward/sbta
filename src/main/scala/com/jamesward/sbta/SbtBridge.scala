@@ -35,6 +35,7 @@ object SbtBridge:
     attempt(session, key) match
       case Attempt.Done(result) => result
       case Attempt.NotInstalled =>
+        server.log(s"this sbt server has no `$Eval` yet (it's new or restarted): loading sbta's bridge")
         install(server, session).flatMap { _ =>
           attempt(session, key) match
             case Attempt.Done(result) => result

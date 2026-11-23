@@ -98,12 +98,16 @@ object McpMain:
 
     // stdout carries MCP messages only: diagnostics go to stderr and to project/target/sbta/mcp.log.
     val logFile = openLog(base)
+    // The pid tells apart the lines of servers sharing mcp.log (a client may start two).
+    val pid = ProcessHandle.current.pid
     def log(message: String): Unit =
-      val line = s"${LocalTime.now.format(DateTimeFormatter.ofPattern("HH:mm:ss"))} sbta: $message"
+      val line = s"${LocalTime.now.format(DateTimeFormatter.ofPattern("HH:mm:ss"))} sbta[$pid]: $message"
       java.lang.System.err.println(line)
       logFile.foreach { out => out.synchronized { out.println(line); out.flush() } }
 
     log(s"MCP server ${SbtaBuildInfo.version} for $base (start=${start.toString.toLowerCase}, java ${java.lang.System.getProperty("java.version")})")
+    val exit = McpExit(log)
+    exit.install()
     val server = SbtServer(base, start, log)
     val tools  = SbtTools(server, log)
     val code   = CodeTools(server, log, docsTools = docsUrl.isDefined)
@@ -140,11 +144,12 @@ object McpMain:
         case Some(url) => withBuildTools.toolSource(updates.withNote(ProxyToolSource(url, log)))
         case None      => withBuildTools
 
-    Unsafe.unsafe { implicit u =>
-      runtime.unsafe.run(mcp.serveStdio.provide(Client.default)).getOrThrowFiberFailure()
-    }
-    log("stdin closed; exiting (sbt keeps running)")
-    sys.exit(0)
+    val served = Unsafe.unsafe(implicit u => runtime.unsafe.run(mcp.serveStdio.provide(Client.default)))
+    served match
+      case Exit.Success(_)     => exit.exit(ExitReason.StdinClosed, 0)
+      case Exit.Failure(cause) =>
+        log(cause.prettyPrint)
+        exit.exit(ExitReason.Failed(cause.squash.toString), 1)
 
   private def openLog(base: Path): Option[PrintStream] =
     try

@@ -84,7 +84,10 @@ Clients start project servers in the project's root directory; elsewhere, add
 
 The server logs what it does to `project/target/sbta/mcp.log`: starting sbt, and each
 sbt command it runs, queued behind another, still running (every minute, with its
-latest output line) or cancelled (with its last output). sbt's startup output is in
+latest output line) or cancelled (with its last output), and how the server ended:
+stdin closed, a signal (`SIGTERM`, `SIGINT`, `SIGHUP`) or a failure. Each line has the
+server's pid (`sbta[<pid>]:`), which tells apart two servers sharing the log. A log
+that just stops means the server got `SIGKILL` or crashed. sbt's startup output is in
 `boot.log` next to it.
 
 | Tool | What it does |

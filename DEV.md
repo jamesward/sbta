@@ -108,6 +108,10 @@ these engines started.
   …`, except its idle `shell`), every minute a request still runs (`Session.StatusEvery`)
   with its latest output line, and a cancelled request's last 20 output lines. Command
   output itself stays out of it; sbt's startup output is in `boot.log` next to it.
+  Every line has the server's pid. `McpExit` writes the last line from a shutdown hook:
+  stdin closed, a failure of the MCP server, or `SIGTERM`/`SIGINT`/`SIGHUP` by name
+  (`sun.misc.Signal` handlers that exit with 128 + the signal's number, as the JVM does
+  by default; a signal the parent ignored stays ignored), or else a bare JVM shutdown.
 - **`reboot`** (sbt's way to switch to a changed `sbt.version`) gets no response: sbt
   sends the channel a `shutdown` notification, `[log, [execId, remainingCommands]]`,
   closes it, and loads sbt again in the same JVM. sbta then does what sbtn does: waits

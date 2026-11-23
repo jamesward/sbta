@@ -21,7 +21,7 @@ enum StartMode derives CanEqual:
  * `sbt --client` when it isn't running. That is sbt's own background server, shared
  * with later `sbt`/`sbtn`/`sbta` commands, and it keeps running after `sbta` exits.
  */
-final class SbtServer(val base: Path, start: StartMode, log: String => Unit):
+final class SbtServer(val base: Path, start: StartMode, val log: String => Unit):
 
   private val activeFile = base.resolve("project").resolve("target").resolve("active.json")
   val runtimeDir: Path   = base.resolve("project").resolve("target").resolve("sbta")

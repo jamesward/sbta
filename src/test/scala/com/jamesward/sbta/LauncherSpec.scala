@@ -666,7 +666,39 @@ object LauncherSpec extends ZIOSpecDefault:
           attempt += 1
           Thread.sleep(250)
 
-  def spec = suite("sbta as a launcher")(suiteFor("1.12.15"), suiteFor("2.1.0")) @@ TestAspect.sequential @@
+  /** The jar's MCP server, without sbt, answering `initialize` (so it's up), then stopped by `stop`; returns its exit code and log. */
+  private def stoppedMcp(stop: Process => Unit): (Int, String) =
+    val dir = Files.createTempDirectory("sbta-exit-")
+    try
+      val builder = ProcessBuilder(
+        Path.of(java.lang.System.getProperty("java.home"), "bin", "java").toString, "-jar", jar.toString, "--mcp", "--start=never", "--docs-url=none",
+      ).directory(dir.toFile).redirectError(ProcessBuilder.Redirect.DISCARD)
+      builder.environment().put("SBTA_NO_UPDATE_CHECK", "1")
+      val process = builder.start()
+      val in      = java.io.BufferedReader(java.io.InputStreamReader(process.getInputStream, StandardCharsets.UTF_8))
+      process.getOutputStream.write(
+        """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"spec","version":"1"}}}
+          |""".stripMargin.getBytes(StandardCharsets.UTF_8)
+      )
+      process.getOutputStream.flush()
+      in.readLine()
+      stop(process)
+      val code = if process.waitFor(60, TimeUnit.SECONDS) then process.exitValue() else { process.destroyForcibly(); -1 }
+      (code, Files.readString(dir.resolve("project/target/sbta/mcp.log")))
+    finally deleteRecursively(dir)
+
+  private val exitLogging = suite("the MCP server logs how it ends, with its pid")(
+    test("stdin closing") {
+      val (code, log) = stoppedMcp(_.getOutputStream.close())
+      assertTrue(code == 0, """sbta\[\d+\]: exiting: stdin closed""".r.findFirstIn(log).isDefined)
+    },
+    test("SIGTERM, by name, exiting as the JVM would without a handler") {
+      val (code, log) = stoppedMcp(_.destroy()) // SIGTERM
+      assertTrue(code == 143, """sbta\[\d+\]: exiting: SIGTERM \(15\)""".r.findFirstIn(log).isDefined)
+    },
+  ) @@ TestAspect.ifProp("os.name")(!_.toLowerCase.contains("win"))
+
+  def spec = suite("sbta as a launcher")(exitLogging, suiteFor("1.12.15"), suiteFor("2.1.0")) @@ TestAspect.sequential @@
     TestAspect.withLiveClock @@ TestAspect.afterAll(ZIO.succeed(deleteRecursively(repo)))
 
   /** A newline-delimited JSON-RPC subprocess (an MCP stdio server). */
