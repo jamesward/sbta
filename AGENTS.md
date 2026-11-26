@@ -18,7 +18,7 @@ works.
 ## Build, Test & Dev Workflow
 
 - `./sbta testFull`: the full validation, everything CI runs on Linux. The launcher specs (`LauncherSpec`)
-  start sbt 1.12.15 and 2.1.0 builds and take a few minutes; `./sbta "testOnly *SbtaSpec"`
+  start sbt 1.12.15 and 2.1.1 builds and take a few minutes; `./sbta "testOnly *SbtaSpec"`
   is the fast unit suite. No tests are gated, paid or need Docker.
 - The shrunk jar (`sbtaShrink`) is what's tested and published. A new reflective call
   that ProGuard can't follow fails `ReflectionSpec`: keep its targets in `proguard.pro`
